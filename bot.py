@@ -6,12 +6,14 @@ import os
 from datetime import datetime
 import io
 import asyncpg
+from PIL import Image
 from aiohttp import web
 
 # Конфигурация
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID'))
-DATABASE_URL = os.getenv('DATABASE_URL')  # Supabase Session Pooler URL
+DATABASE_URL = os.getenv('DATABASE_URL')
+PORT = int(os.getenv('PORT', 10000))
 
 # Database pool
 db_pool = None
@@ -39,6 +41,27 @@ async def close_db_pool():
     if db_pool:
         await db_pool.close()
         print("✓ Database pool закрыт")
+
+# HTTP сервер для Render health checks
+async def handle_health(request):
+    """Health check endpoint"""
+    return web.Response(text="OK", status=200)
+
+async def handle_root(request):
+    """Root endpoint"""
+    return web.Response(text="DTEK Bot is running!", status=200)
+
+async def start_web_server():
+    """Запуск веб-сервера для Render"""
+    app = web.Application()
+    app.router.add_get('/', handle_root)
+    app.router.add_get('/health', handle_health)
+    
+    runner = web.AppRunner(app)
+    await runner.setup()
+    site = web.TCPSite(runner, '0.0.0.0', PORT)
+    await site.start()
+    print(f"✓ Web server запущен на порту {PORT}")
 
 class DTEKChecker:
     def __init__(self):
@@ -68,6 +91,31 @@ class DTEKChecker:
         if self.playwright:
             await self.playwright.stop()
     
+    def crop_screenshot(self, screenshot_bytes, top_crop=300, bottom_crop=400, left_crop=0, right_crop=0):
+        """Обрезает скриншот: убирает верх (шапку) и низ (футер)"""
+        try:
+            image = Image.open(io.BytesIO(screenshot_bytes))
+            width, height = image.size
+            
+            # Вычисляем новые границы
+            left = left_crop
+            top = top_crop
+            right = width - right_crop
+            bottom = height - bottom_crop
+            
+            print(f"Обрезаю скриншот: {width}x{height} -> {right-left}x{bottom-top}")
+            
+            # Обрезаем
+            cropped = image.crop((left, top, right, bottom))
+            
+            # Конвертируем обратно в bytes
+            output = io.BytesIO()
+            cropped.save(output, format='PNG', optimize=True, quality=95)
+            return output.getvalue()
+        except Exception as e:
+            print(f"⚠ Ошибка при обрезке скриншота: {e}")
+            return screenshot_bytes
+    
     async def check_shutdowns(self):
         """Основная функция проверки отключений"""
         await self.init_browser()
@@ -91,16 +139,15 @@ class DTEKChecker:
                 print("Модальное окно закрыто")
                 await asyncio.sleep(1)
             except Exception as e:
-                print(f"Модальное окно не найдено или уже закрыто: {e}")
+                print(f"Модальное окно не найдено или уже закрыто")
             
-            # 3. Вводим ЧАСТИЧНОЕ название города (как в Automa: "княж")
+            # 3. Вводим ЧАСТИЧНОЕ название города
             print("Ввожу город...")
             city_input = page.locator('.discon-input-wrapper #city')
             await city_input.wait_for(state='visible', timeout=5000)
             await city_input.click()
             await city_input.clear()
-            await city_input.type('княж', delay=100)
-            
+            await city_input.type('книж', delay=100)
             await city_input.dispatch_event('change')
             await asyncio.sleep(1.5)
             
@@ -112,14 +159,13 @@ class DTEKChecker:
             print("Город выбран")
             await asyncio.sleep(1)
             
-            # 5. Вводим ЧАСТИЧНОЕ название улицы (как в Automa: "киї")
+            # 5. Вводим ЧАСТИЧНОЕ название улицы
             print("Ввожу улицу...")
             street_input = page.locator('.discon-input-wrapper #street')
             await street_input.wait_for(state='visible', timeout=5000)
             await street_input.click()
             await street_input.clear()
             await street_input.type('киї', delay=100)
-            
             await street_input.dispatch_event('change')
             await asyncio.sleep(1.5)
             
@@ -131,14 +177,13 @@ class DTEKChecker:
             print("Улица выбрана")
             await asyncio.sleep(1)
             
-            # 7. Вводим номер дома полностью (как в Automa: "168")
+            # 7. Вводим номер дома полностью
             print("Ввожу номер дома...")
             house_input = page.locator('input#house_num')
             await house_input.wait_for(state='visible', timeout=5000)
             await house_input.click()
             await house_input.clear()
             await house_input.type('168', delay=100)
-            
             await house_input.dispatch_event('change')
             await asyncio.sleep(1.5)
             
@@ -161,17 +206,46 @@ class DTEKChecker:
                 print(f"✓ Дата обновления: {update_date}")
             except Exception as e:
                 print(f"⚠ Не удалось получить дату обновления: {e}")
+                update_date = "Невідомо"
             
-            # 10. Делаем полноразмерный скриншот страницы
-            print("Делаю скриншот...")
-            screenshot = await page.screenshot(full_page=True, type='png')
-            print("✓ Скриншот готов")
+            # 10. Делаем полноразмерный скриншот страницы (основной график)
+            print("Делаю скриншот основного графика...")
+            screenshot_main = await page.screenshot(full_page=True, type='png')
+            screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
+            print("✓ Скриншот основного графика готов и обрезан")
+            
+            # 11. Кликаем на второй элемент div.date для второго графика
+            print("Кликаю на второй график (завтра)...")
+            second_date = None
+            try:
+                date_selector = page.locator('div.date:nth-child(2)')
+                await date_selector.wait_for(state='visible', timeout=5000)
+                
+                # Получаем текст даты перед кликом
+                second_date = await date_selector.text_content()
+                second_date = second_date.strip()
+                print(f"Дата второго графика: {second_date}")
+                
+                await date_selector.click()
+                await asyncio.sleep(3)  # Ждем загрузки графика
+                
+                # 12. Делаем второй скриншот
+                print("Делаю скриншот второго графика...")
+                screenshot_tomorrow = await page.screenshot(full_page=True, type='png')
+                screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
+                print("✓ Скриншот второго графика готов и обрезан")
+            except Exception as e:
+                print(f"⚠ Не удалось получить второй график: {e}")
+                screenshot_tomorrow_cropped = None
+                second_date = None
             
             await page.close()
             
             return {
-                'screenshot': screenshot,
+                'screenshot_main': screenshot_main_cropped,
+                'screenshot_tomorrow': screenshot_tomorrow_cropped,
                 'update_date': update_date,
+                'second_date': second_date,
                 'timestamp': datetime.now().isoformat()
             }
             
@@ -213,6 +287,7 @@ async def on_ready():
     print(f'✓ Мониторинг канала: {CHANNEL_ID}')
     print(f'✓ Интервал проверки: каждые 5 минут')
     await init_db_pool()
+    await start_web_server()
     check_schedule.start()
 
 @tasks.loop(minutes=5)
@@ -234,58 +309,75 @@ async def check_schedule():
         # Получаем последнюю проверку из БД
         last_check = await get_last_check()
         
-        # Проверяем, изменилась ли информация
+        # Проверяем, изменилась ли дата обновления
         is_updated = False
         if not last_check or last_check.get('update_date') != result['update_date']:
             is_updated = True
             await save_check(result['update_date'])
             print(f"🔔 ИНФОРМАЦИЯ ОБНОВИЛАСЬ! Старая дата: {last_check.get('update_date') if last_check else 'отсутствует'}, Новая: {result['update_date']}")
         else:
-            print(f"ℹ️  Без изменений. Дата обновления: {result['update_date']}")
+            print(f"ℹ️ Без изменений. Дата обновления: {result['update_date']}")
         
-        # Формируем embed сообщение
-        embed = discord.Embed(
-            title="⚡ Графік відключень ДТЕК Київські регіональні електромережі",
-            description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
-            color=discord.Color.orange() if is_updated else discord.Color.blue(),
-            timestamp=datetime.now()
-        )
-        
-        if result['update_date']:
-            embed.add_field(
-                name="🕐 Дата оновлення на сайті",
-                value=f"`{result['update_date']}`",
-                inline=False
-            )
-        
+        # Отправляем сообщение только если есть обновление
         if is_updated:
+            # Формируем embed сообщение
+            embed = discord.Embed(
+                title="⚡ Графік відключень ДТЕК Київські регіональні електромережі",
+                description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
+                color=discord.Color.orange(),
+                timestamp=datetime.now()
+            )
+            
+            if result['update_date']:
+                embed.add_field(
+                    name="🕐 Дата оновлення на сайті",
+                    value=f"`{result['update_date']}`",
+                    inline=False
+                )
+            
             embed.add_field(
                 name="✅ Статус",
                 value="**🔔 ІНФОРМАЦІЯ ОНОВИЛАСЬ!**",
                 inline=False
             )
             embed.set_footer(text="Нова інформація • Автоматична перевірка")
-        else:
-            embed.add_field(
-                name="ℹ️ Статус",
-                value="Без змін",
-                inline=False
+            
+            # Отправляем основной скриншот (сегодня)
+            timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+            file_main = discord.File(
+                io.BytesIO(result['screenshot_main']), 
+                filename=f"dtek_today_{timestamp_str}.png"
             )
-            embed.set_footer(text="Планова перевірка")
+            
+            await channel.send(embed=embed, file=file_main)
+            
+            # Отправляем второй скриншот (завтра), если есть
+            if result['screenshot_tomorrow']:
+                embed_tomorrow = discord.Embed(
+                    title="📅 Графік відключень на завтра",
+                    description=f"**📍 Адреса:** с. Книжичі, вул. Київська, 168\n**📆 Дата:** {result['second_date'] or 'Завтра'}",
+                    color=discord.Color.blue(),
+                    timestamp=datetime.now()
+                )
+                
+                file_tomorrow = discord.File(
+                    io.BytesIO(result['screenshot_tomorrow']), 
+                    filename=f"dtek_tomorrow_{timestamp_str}.png"
+                )
+                
+                await channel.send(embed=embed_tomorrow, file=file_tomorrow)
+            
+            print(f"✓ Сообщение отправлено в Discord (обновление: {is_updated})")
+        else:
+            print(f"ℹ️ Изменений нет, сообщение не отправлено")
         
-        # Отправляем скриншот
-        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-        file = discord.File(
-            io.BytesIO(result['screenshot']), 
-            filename=f"dtek_schedule_{timestamp_str}.png"
-        )
-        
-        await channel.send(embed=embed, file=file)
-        print(f"✓ Сообщение отправлено в Discord (обновление: {is_updated})")
         print(f"{'='*50}\n")
         
     except Exception as e:
         print(f"❌ Ошибка в check_schedule: {e}")
+        import traceback
+        traceback.print_exc()
+        
         channel = bot.get_channel(CHANNEL_ID)
         if channel:
             error_embed = discord.Embed(
@@ -310,6 +402,9 @@ async def manual_check(ctx):
     try:
         result = await checker.check_shutdowns()
         
+        # Обновляем БД
+        await save_check(result['update_date'])
+        
         embed = discord.Embed(
             title="⚡ Графік відключень ДТЕК (Ручна перевірка)",
             description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
@@ -326,13 +421,30 @@ async def manual_check(ctx):
         
         embed.set_footer(text="Ручна перевірка • Запущено командою !check")
         
+        # Отправляем основной скриншот
         timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-        file = discord.File(
-            io.BytesIO(result['screenshot']), 
-            filename=f"dtek_manual_{timestamp_str}.png"
+        file_main = discord.File(
+            io.BytesIO(result['screenshot_main']), 
+            filename=f"dtek_manual_today_{timestamp_str}.png"
         )
         
-        await ctx.send(embed=embed, file=file)
+        await ctx.send(embed=embed, file=file_main)
+        
+        # Отправляем второй скриншот, если есть
+        if result['screenshot_tomorrow']:
+            embed_tomorrow = discord.Embed(
+                title="📅 Графік відключень на завтра",
+                description=f"**📍 Адреса:** с. Книжичі, вул. Київська, 168\n**📆 Дата:** {result['second_date'] or 'Завтра'}",
+                color=discord.Color.blue(),
+                timestamp=datetime.now()
+            )
+            
+            file_tomorrow = discord.File(
+                io.BytesIO(result['screenshot_tomorrow']), 
+                filename=f"dtek_manual_tomorrow_{timestamp_str}.png"
+            )
+            
+            await ctx.send(embed=embed_tomorrow, file=file_tomorrow)
         
     except Exception as e:
         error_embed = discord.Embed(
