@@ -1,5 +1,5 @@
 services:
-  - type: worker
+  - type: web
     name: dtek-discord-bot
     runtime: python
     region: frankfurt
