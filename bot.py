@@ -4,19 +4,40 @@ import asyncio
 from playwright.async_api import async_playwright
 import os
 from datetime import datetime
-import psycopg2
-from psycopg2.extras import RealDictCursor
 import io
+import asyncpg
 
 # Конфигурация
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID'))
-DATABASE_URL = os.getenv('DATABASE_URL')  # Session pooler ссылка из Supabase
+DATABASE_URL = os.getenv('DATABASE_URL')  # Supabase Session Pooler URL
+
+# Database pool
+db_pool = None
 
 # Создание бота
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
+
+async def init_db_pool():
+    """Инициализация connection pool для PostgreSQL"""
+    global db_pool
+    if not db_pool:
+        db_pool = await asyncpg.create_pool(
+            DATABASE_URL,
+            min_size=1,
+            max_size=10,
+            command_timeout=60
+        )
+        print("✓ Database pool создан")
+
+async def close_db_pool():
+    """Закрытие connection pool"""
+    global db_pool
+    if db_pool:
+        await db_pool.close()
+        print("✓ Database pool закрыт")
 
 class DTEKChecker:
     def __init__(self):
@@ -77,13 +98,12 @@ class DTEKChecker:
             await city_input.wait_for(state='visible', timeout=5000)
             await city_input.click()
             await city_input.clear()
-            await city_input.type('княж', delay=100)  # Печатаем по буквам с задержкой
+            await city_input.type('княж', delay=100)
             
-            # Триггерим событие change
             await city_input.dispatch_event('change')
-            await asyncio.sleep(1.5)  # Ждем появления выпадающего списка
+            await asyncio.sleep(1.5)
             
-            # 4. Кликаем на ВТОРОЙ элемент из выпадающего списка (Книжичі Броварський)
+            # 4. Кликаем на ВТОРОЙ элемент из выпадающего списка
             print("Выбираю из списка: с. Книжичі (Броварський)...")
             city_option = page.locator('#cityautocomplete-list > div:nth-child(2)')
             await city_option.wait_for(state='visible', timeout=5000)
@@ -97,13 +117,12 @@ class DTEKChecker:
             await street_input.wait_for(state='visible', timeout=5000)
             await street_input.click()
             await street_input.clear()
-            await street_input.type('киї', delay=100)  # Печатаем по буквам
+            await street_input.type('киї', delay=100)
             
-            # Триггерим событие change
             await street_input.dispatch_event('change')
-            await asyncio.sleep(1.5)  # Ждем появления выпадающего списка
+            await asyncio.sleep(1.5)
             
-            # 6. Кликаем на ВТОРОЙ элемент из выпадающего списка (вул. Київська)
+            # 6. Кликаем на ВТОРОЙ элемент из выпадающего списка
             print("Выбираю из списка: вул. Київська...")
             street_option = page.locator('#streetautocomplete-list > div:nth-child(2)')
             await street_option.wait_for(state='visible', timeout=5000)
@@ -119,17 +138,16 @@ class DTEKChecker:
             await house_input.clear()
             await house_input.type('168', delay=100)
             
-            # Триггерим событие change
             await house_input.dispatch_event('change')
-            await asyncio.sleep(1.5)  # Ждем появления выпадающего списка
+            await asyncio.sleep(1.5)
             
-            # 8. Кликаем на ПЕРВЫЙ элемент из выпадающего списка (168)
+            # 8. Кликаем на ПЕРВЫЙ элемент из выпадающего списка
             print("Выбираю из списка: 168...")
             house_option = page.locator('#house_numautocomplete-list > div:first-child')
             await house_option.wait_for(state='visible', timeout=5000)
             await house_option.click()
             print("Номер дома выбран")
-            await asyncio.sleep(3)  # Даем время на загрузку результатов
+            await asyncio.sleep(3)
             
             # 9. Получаем дату обновления из span.update
             print("Получаю дату обновления...")
@@ -163,67 +181,27 @@ class DTEKChecker:
 
 checker = DTEKChecker()
 
-def get_db_connection():
-    """Создает подключение к PostgreSQL"""
-    return psycopg2.connect(DATABASE_URL, cursor_factory=RealDictCursor)
-
-def init_database():
-    """Создает таблицу если её нет"""
+async def get_last_check():
+    """Получает данные последней проверки из БД через Session Pooler"""
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        cur.execute("""
-            CREATE TABLE IF NOT EXISTS dtek_checks (
-                id SERIAL PRIMARY KEY,
-                update_date TEXT,
-                created_at TIMESTAMP DEFAULT CURRENT_TIMESTAMP
+        async with db_pool.acquire() as conn:
+            row = await conn.fetchrow(
+                'SELECT update_date, created_at FROM dtek_checks ORDER BY created_at DESC LIMIT 1'
             )
-        """)
-        
-        conn.commit()
-        cur.close()
-        conn.close()
-        print("✓ База данных инициализирована")
+            if row:
+                return {'update_date': row['update_date'], 'created_at': row['created_at']}
     except Exception as e:
-        print(f"❌ Ошибка инициализации БД: {e}")
+        print(f"Ошибка при получении данных из БД: {e}")
+    return None
 
-def get_last_check():
-    """Получает последнюю проверку из БД"""
+async def save_check(update_date):
+    """Сохраняет данные проверки в БД через Session Pooler"""
     try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        cur.execute("""
-            SELECT update_date, created_at 
-            FROM dtek_checks 
-            ORDER BY created_at DESC 
-            LIMIT 1
-        """)
-        
-        result = cur.fetchone()
-        cur.close()
-        conn.close()
-        
-        return dict(result) if result else None
-    except Exception as e:
-        print(f"❌ Ошибка при получении данных из БД: {e}")
-        return None
-
-def save_check(update_date):
-    """Сохраняет проверку в БД"""
-    try:
-        conn = get_db_connection()
-        cur = conn.cursor()
-        
-        cur.execute("""
-            INSERT INTO dtek_checks (update_date, created_at)
-            VALUES (%s, %s)
-        """, (update_date, datetime.now()))
-        
-        conn.commit()
-        cur.close()
-        conn.close()
+        async with db_pool.acquire() as conn:
+            await conn.execute(
+                'INSERT INTO dtek_checks (update_date, created_at) VALUES ($1, $2)',
+                update_date, datetime.now()
+            )
         print(f"✓ Данные сохранены в БД: {update_date}")
     except Exception as e:
         print(f"❌ Ошибка при сохранении в БД: {e}")
@@ -233,11 +211,7 @@ async def on_ready():
     print(f'✓ {bot.user} подключен к Discord!')
     print(f'✓ Мониторинг канала: {CHANNEL_ID}')
     print(f'✓ Интервал проверки: каждые 5 минут')
-    
-    # Инициализируем БД
-    init_database()
-    
-    # Запускаем периодические проверки
+    await init_db_pool()
     check_schedule.start()
 
 @tasks.loop(minutes=5)
@@ -257,13 +231,13 @@ async def check_schedule():
         result = await checker.check_shutdowns()
         
         # Получаем последнюю проверку из БД
-        last_check = get_last_check()
+        last_check = await get_last_check()
         
         # Проверяем, изменилась ли информация
         is_updated = False
         if not last_check or last_check.get('update_date') != result['update_date']:
             is_updated = True
-            save_check(result['update_date'])
+            await save_check(result['update_date'])
             print(f"🔔 ИНФОРМАЦИЯ ОБНОВИЛАСЬ! Старая дата: {last_check.get('update_date') if last_check else 'отсутствует'}, Новая: {result['update_date']}")
         else:
             print(f"ℹ️  Без изменений. Дата обновления: {result['update_date']}")
@@ -388,7 +362,7 @@ async def bot_info(ctx):
         inline=True
     )
     
-    last_check = get_last_check()
+    last_check = await get_last_check()
     if last_check:
         embed.add_field(
             name="🕐 Остання перевірка",
@@ -411,6 +385,7 @@ async def stop_bot(ctx):
     await ctx.send("🛑 Зупиняю бота...")
     check_schedule.cancel()
     await checker.close_browser()
+    await close_db_pool()
     await bot.close()
 
 if __name__ == '__main__':
@@ -422,3 +397,4 @@ if __name__ == '__main__':
         print("\n🛑 Остановка бота...")
     finally:
         asyncio.run(checker.close_browser())
+        asyncio.run(close_db_pool())
