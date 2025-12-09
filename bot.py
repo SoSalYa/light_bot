@@ -6,6 +6,7 @@ import os
 from datetime import datetime
 import io
 import asyncpg
+from aiohttp import web
 
 # Конфигурация
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
