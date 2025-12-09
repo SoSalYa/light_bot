@@ -79,7 +79,8 @@ class DTEKChecker:
             )
             self.context = await self.browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
-                locale='uk-UA'
+                locale='uk-UA',
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
             )
     
     async def close_browser(self):
@@ -127,8 +128,8 @@ class DTEKChecker:
             # 1. Открываем страницу
             print("Открываю страницу DTEK...")
             await page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', 
-                          wait_until='domcontentloaded', timeout=30000)
-            await asyncio.sleep(2)
+                          wait_until='networkidle', timeout=60000)
+            await asyncio.sleep(3)
             
             # 2. Закрываем модальное окно (если есть)
             try:
@@ -137,76 +138,85 @@ class DTEKChecker:
                 await close_btn.wait_for(state='visible', timeout=5000)
                 await close_btn.click()
                 print("Модальное окно закрыто")
-                await asyncio.sleep(1)
+                await asyncio.sleep(2)
             except Exception as e:
                 print(f"Модальное окно не найдено или уже закрыто")
             
             # 3. Вводим ЧАСТИЧНОЕ название города
             print("Ввожу город...")
             city_input = page.locator('.discon-input-wrapper #city')
-            await city_input.wait_for(state='visible', timeout=5000)
+            await city_input.wait_for(state='visible', timeout=10000)
             await city_input.click()
-            await city_input.clear()
-            await city_input.type('книж', delay=100)
-            await city_input.dispatch_event('change')
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(0.5)
+            await city_input.fill('')  # Очищаем поле
+            await asyncio.sleep(0.5)
+            await city_input.type('книж', delay=150)
+            await asyncio.sleep(3)  # Ждем появления списка
             
             # 4. Кликаем на ВТОРОЙ элемент из выпадающего списка
             print("Выбираю из списка: с. Книжичі (Броварський)...")
             city_option = page.locator('#cityautocomplete-list > div:nth-child(2)')
-            await city_option.wait_for(state='visible', timeout=5000)
+            await city_option.wait_for(state='visible', timeout=10000)
+            await asyncio.sleep(0.5)
             await city_option.click()
             print("Город выбран")
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
             
             # 5. Вводим ЧАСТИЧНОЕ название улицы
             print("Ввожу улицу...")
             street_input = page.locator('.discon-input-wrapper #street')
-            await street_input.wait_for(state='visible', timeout=5000)
+            await street_input.wait_for(state='visible', timeout=10000)
             await street_input.click()
-            await street_input.clear()
-            await street_input.type('киї', delay=100)
-            await street_input.dispatch_event('change')
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(0.5)
+            await street_input.fill('')
+            await asyncio.sleep(0.5)
+            await street_input.type('киї', delay=150)
+            await asyncio.sleep(3)
             
             # 6. Кликаем на ВТОРОЙ элемент из выпадающего списка
             print("Выбираю из списка: вул. Київська...")
             street_option = page.locator('#streetautocomplete-list > div:nth-child(2)')
-            await street_option.wait_for(state='visible', timeout=5000)
+            await street_option.wait_for(state='visible', timeout=10000)
+            await asyncio.sleep(0.5)
             await street_option.click()
             print("Улица выбрана")
-            await asyncio.sleep(1)
+            await asyncio.sleep(2)
             
             # 7. Вводим номер дома полностью
             print("Ввожу номер дома...")
             house_input = page.locator('input#house_num')
-            await house_input.wait_for(state='visible', timeout=5000)
+            await house_input.wait_for(state='visible', timeout=10000)
             await house_input.click()
-            await house_input.clear()
-            await house_input.type('168', delay=100)
-            await house_input.dispatch_event('change')
-            await asyncio.sleep(1.5)
+            await asyncio.sleep(0.5)
+            await house_input.fill('')
+            await asyncio.sleep(0.5)
+            await house_input.type('168', delay=150)
+            await asyncio.sleep(3)
             
             # 8. Кликаем на ПЕРВЫЙ элемент из выпадающего списка
             print("Выбираю из списка: 168...")
             house_option = page.locator('#house_numautocomplete-list > div:first-child')
-            await house_option.wait_for(state='visible', timeout=5000)
+            await house_option.wait_for(state='visible', timeout=10000)
+            await asyncio.sleep(0.5)
             await house_option.click()
             print("Номер дома выбран")
-            await asyncio.sleep(3)
+            await asyncio.sleep(4)
             
             # 9. Получаем дату обновления из span.update
             print("Получаю дату обновления...")
             update_date = None
             try:
                 update_elem = page.locator('span.update')
-                await update_elem.wait_for(state='visible', timeout=10000)
+                await update_elem.wait_for(state='visible', timeout=15000)
                 update_date = await update_elem.text_content()
                 update_date = update_date.strip()
                 print(f"✓ Дата обновления: {update_date}")
             except Exception as e:
                 print(f"⚠ Не удалось получить дату обновления: {e}")
                 update_date = "Невідомо"
+            
+            # Ждем полной загрузки графика
+            await asyncio.sleep(2)
             
             # 10. Делаем полноразмерный скриншот страницы (основной график)
             print("Делаю скриншот основного графика...")
@@ -219,7 +229,7 @@ class DTEKChecker:
             second_date = None
             try:
                 date_selector = page.locator('div.date:nth-child(2)')
-                await date_selector.wait_for(state='visible', timeout=5000)
+                await date_selector.wait_for(state='visible', timeout=10000)
                 
                 # Получаем текст даты перед кликом
                 second_date = await date_selector.text_content()
@@ -227,7 +237,7 @@ class DTEKChecker:
                 print(f"Дата второго графика: {second_date}")
                 
                 await date_selector.click()
-                await asyncio.sleep(3)  # Ждем загрузки графика
+                await asyncio.sleep(4)  # Ждем загрузки графика
                 
                 # 12. Делаем второй скриншот
                 print("Делаю скриншот второго графика...")
@@ -293,6 +303,7 @@ async def on_ready():
 @tasks.loop(minutes=5)
 async def check_schedule():
     """Периодическая проверка каждые 5 минут"""
+    channel = None
     try:
         channel = bot.get_channel(CHANNEL_ID)
         if not channel:
@@ -303,8 +314,12 @@ async def check_schedule():
         print(f"[{datetime.now()}] Запуск автоматической проверки...")
         print(f"{'='*50}")
         
-        # Выполняем проверку
-        result = await checker.check_shutdowns()
+        # Выполняем проверку с таймаутом
+        try:
+            result = await asyncio.wait_for(checker.check_shutdowns(), timeout=120)
+        except asyncio.TimeoutError:
+            print("❌ Таймаут проверки (120 секунд)")
+            raise Exception("Проверка заняла слишком много времени")
         
         # Получаем последнюю проверку из БД
         last_check = await get_last_check()
@@ -378,15 +393,25 @@ async def check_schedule():
         import traceback
         traceback.print_exc()
         
-        channel = bot.get_channel(CHANNEL_ID)
+        # Пытаемся переинициализировать браузер при ошибке
+        try:
+            print("Переинициализирую браузер...")
+            await checker.close_browser()
+            await asyncio.sleep(5)
+        except:
+            pass
+        
         if channel:
-            error_embed = discord.Embed(
-                title="❌ Помилка",
-                description=f"Не вдалося виконати перевірку:\n```{str(e)}```",
-                color=discord.Color.red(),
-                timestamp=datetime.now()
-            )
-            await channel.send(embed=error_embed)
+            try:
+                error_embed = discord.Embed(
+                    title="⚠️ Помилка перевірки",
+                    description=f"Не вдалося виконати перевірку. Спробую знову за 5 хвилин.\n```{str(e)[:200]}```",
+                    color=discord.Color.red(),
+                    timestamp=datetime.now()
+                )
+                await channel.send(embed=error_embed)
+            except:
+                print("Не удалось отправить сообщение об ошибке")
 
 @check_schedule.before_loop
 async def before_check_schedule():
