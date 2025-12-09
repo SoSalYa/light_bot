@@ -1,20 +1,24 @@
 services:
   - type: worker
     name: dtek-discord-bot
-    env: python
+    runtime: python
     region: frankfurt
     plan: free
-    buildCommand: pip install -r requirements.txt && playwright install --with-deps chromium
+    branch: main
+    buildCommand: |
+      pip install --upgrade pip
+      pip install -r requirements.txt
+      playwright install --with-deps chromium
     startCommand: python bot.py
     envVars:
       - key: DISCORD_TOKEN
         sync: false
       - key: DISCORD_CHANNEL_ID
         sync: false
-      - key: SUPABASE_URL
-        sync: false
-      - key: SUPABASE_KEY
+      - key: DATABASE_URL
         sync: false
       - key: PYTHON_VERSION
-        value: "3.11.0"
+        value: "3.11"
+      - key: PLAYWRIGHT_BROWSERS_PATH
+        value: "0"
     autoDeploy: true
