@@ -81,6 +81,7 @@ class DTEKChecker:
                 viewport={'width': 1920, 'height': 1080},
                 locale='uk-UA'
             )
+            print("✓ Браузер инициализирован")
     
     async def close_browser(self):
         """Закрытие браузера"""
@@ -141,13 +142,14 @@ class DTEKChecker:
             except Exception as e:
                 print(f"Модальное окно не найдено или уже закрыто")
             
-            # 3. Вводим ЧАСТИЧНОЕ название города
+            # 3. Вводим ЧАСТИЧНОЕ название города (как в Automa: "книж")
             print("Ввожу город...")
             city_input = page.locator('.discon-input-wrapper #city')
             await city_input.wait_for(state='visible', timeout=5000)
             await city_input.click()
             await city_input.clear()
             await city_input.type('книж', delay=100)
+            
             await city_input.dispatch_event('change')
             await asyncio.sleep(1.5)
             
@@ -159,13 +161,14 @@ class DTEKChecker:
             print("Город выбран")
             await asyncio.sleep(1)
             
-            # 5. Вводим ЧАСТИЧНОЕ название улицы
+            # 5. Вводим ЧАСТИЧНОЕ название улицы (как в Automa: "киї")
             print("Ввожу улицу...")
             street_input = page.locator('.discon-input-wrapper #street')
             await street_input.wait_for(state='visible', timeout=5000)
             await street_input.click()
             await street_input.clear()
             await street_input.type('киї', delay=100)
+            
             await street_input.dispatch_event('change')
             await asyncio.sleep(1.5)
             
@@ -177,13 +180,14 @@ class DTEKChecker:
             print("Улица выбрана")
             await asyncio.sleep(1)
             
-            # 7. Вводим номер дома полностью
+            # 7. Вводим номер дома полностью (как в Automa: "168")
             print("Ввожу номер дома...")
             house_input = page.locator('input#house_num')
             await house_input.wait_for(state='visible', timeout=5000)
             await house_input.click()
             await house_input.clear()
             await house_input.type('168', delay=100)
+            
             await house_input.dispatch_event('change')
             await asyncio.sleep(1.5)
             
@@ -208,6 +212,9 @@ class DTEKChecker:
                 print(f"⚠ Не удалось получить дату обновления: {e}")
                 update_date = "Невідомо"
             
+            # Ждем полной загрузки графика
+            await asyncio.sleep(1)
+            
             # 10. Делаем полноразмерный скриншот страницы (основной график)
             print("Делаю скриншот основного графика...")
             screenshot_main = await page.screenshot(full_page=True, type='png')
@@ -219,7 +226,7 @@ class DTEKChecker:
             second_date = None
             try:
                 date_selector = page.locator('div.date:nth-child(2)')
-                await date_selector.wait_for(state='visible', timeout=5000)
+                await date_selector.wait_for(state='visible', timeout=10000)
                 
                 # Получаем текст даты перед кликом
                 second_date = await date_selector.text_content()
@@ -227,7 +234,7 @@ class DTEKChecker:
                 print(f"Дата второго графика: {second_date}")
                 
                 await date_selector.click()
-                await asyncio.sleep(3)  # Ждем загрузки графика
+                await asyncio.sleep(4)  # Ждем загрузки графика
                 
                 # 12. Делаем второй скриншот
                 print("Делаю скриншот второго графика...")
@@ -251,7 +258,10 @@ class DTEKChecker:
             
         except Exception as e:
             print(f"❌ Ошибка при проверке: {e}")
-            await page.close()
+            try:
+                await page.close()
+            except:
+                pass
             raise
 
 checker = DTEKChecker()
@@ -293,6 +303,7 @@ async def on_ready():
 @tasks.loop(minutes=5)
 async def check_schedule():
     """Периодическая проверка каждые 5 минут"""
+    channel = None
     try:
         channel = bot.get_channel(CHANNEL_ID)
         if not channel:
@@ -303,8 +314,12 @@ async def check_schedule():
         print(f"[{datetime.now()}] Запуск автоматической проверки...")
         print(f"{'='*50}")
         
-        # Выполняем проверку
-        result = await checker.check_shutdowns()
+        # Выполняем проверку с таймаутом
+        try:
+            result = await asyncio.wait_for(checker.check_shutdowns(), timeout=120)
+        except asyncio.TimeoutError:
+            print("❌ Таймаут проверки (120 секунд)")
+            raise Exception("Проверка заняла слишком много времени")
         
         # Получаем последнюю проверку из БД
         last_check = await get_last_check()
@@ -378,15 +393,17 @@ async def check_schedule():
         import traceback
         traceback.print_exc()
         
-        channel = bot.get_channel(CHANNEL_ID)
         if channel:
-            error_embed = discord.Embed(
-                title="❌ Помилка",
-                description=f"Не вдалося виконати перевірку:\n```{str(e)}```",
-                color=discord.Color.red(),
-                timestamp=datetime.now()
-            )
-            await channel.send(embed=error_embed)
+            try:
+                error_embed = discord.Embed(
+                    title="⚠️ Помилка перевірки",
+                    description=f"Не вдалося виконати перевірку. Спробую знову за 5 хвилин.\n```{str(e)[:200]}```",
+                    color=discord.Color.red(),
+                    timestamp=datetime.now()
+                )
+                await channel.send(embed=error_embed)
+            except:
+                print("Не удалось отправить сообщение об ошибке")
 
 @check_schedule.before_loop
 async def before_check_schedule():
@@ -400,7 +417,8 @@ async def manual_check(ctx):
     await ctx.send("⏳ Починаю перевірку графіка відключень...")
     
     try:
-        result = await checker.check_shutdowns()
+        # Даем немного больше времени для ручной проверки
+        result = await asyncio.wait_for(checker.check_shutdowns(), timeout=120)
         
         # Обновляем БД
         await save_check(result['update_date'])
@@ -446,10 +464,21 @@ async def manual_check(ctx):
             
             await ctx.send(embed=embed_tomorrow, file=file_tomorrow)
         
+    except asyncio.TimeoutError:
+        error_embed = discord.Embed(
+            title="⏱️ Таймаут",
+            description="Перевірка зайняла більше 2 хвилин. Спробуйте ще раз.",
+            color=discord.Color.orange()
+        )
+        await ctx.send(embed=error_embed)
     except Exception as e:
+        import traceback
+        error_text = traceback.format_exc()
+        print(f"Ошибка в manual_check:\n{error_text}")
+        
         error_embed = discord.Embed(
             title="❌ Помилка",
-            description=f"```{str(e)}```",
+            description=f"```{str(e)[:500]}```",
             color=discord.Color.red()
         )
         await ctx.send(embed=error_embed)
@@ -475,19 +504,60 @@ async def bot_info(ctx):
         inline=True
     )
     
+    # Статус браузера
+    browser_status = "❌ Закритий"
+    if checker.playwright and checker.browser and checker.context:
+        browser_status = "⚠️ Відкритий (буде закрито перед наступною перевіркою)"
+    elif checker.browser:
+        browser_status = "⚠️ Частково відкритий"
+    
+    embed.add_field(
+        name="🌐 Статус браузера",
+        value=browser_status,
+        inline=True
+    )
+    
     last_check = await get_last_check()
     if last_check:
         embed.add_field(
             name="🕐 Остання перевірка",
             value=f"`{last_check.get('update_date', 'Невідомо')}`",
-            inline=True
+            inline=False
         )
     
     embed.add_field(
         name="📝 Доступні команди",
-        value="`!check` - Ручна перевірка\n`!info` - Інформація про бота\n`!stop` - Зупинити бота (тільки адміни)",
+        value="`!check` - Ручна перевірка\n`!info` - Інформація про бота\n`!status` - Детальний статус\n`!stop` - Зупинити бота (тільки адміни)",
         inline=False
     )
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='status')
+async def bot_status(ctx):
+    """Детальный статус бота для диагностики"""
+    embed = discord.Embed(
+        title="🔍 Детальний статус бота",
+        color=discord.Color.purple(),
+        timestamp=datetime.now()
+    )
+    
+    # Проверяем компоненты
+    playwright_status = "✅ Готовий" if not checker.playwright else "⚠️ Відкритий"
+    browser_status = "✅ Готовий" if not checker.browser else "⚠️ Відкритий"
+    context_status = "✅ Готовий" if not checker.context else "⚠️ Відкритий"
+    
+    embed.add_field(name="Playwright", value=playwright_status, inline=True)
+    embed.add_field(name="Browser", value=browser_status, inline=True)
+    embed.add_field(name="Context", value=context_status, inline=True)
+    
+    # Проверяем БД
+    db_status = "✅ Підключено" if db_pool else "❌ Не підключено"
+    embed.add_field(name="База даних", value=db_status, inline=False)
+    
+    # Проверяем задачу
+    task_status = "✅ Запущено" if check_schedule.is_running() else "❌ Зупинено"
+    embed.add_field(name="Автоматична перевірка", value=task_status, inline=False)
     
     await ctx.send(embed=embed)
 
@@ -497,7 +567,10 @@ async def stop_bot(ctx):
     """Остановка бота (только для администраторов)"""
     await ctx.send("🛑 Зупиняю бота...")
     check_schedule.cancel()
-    await checker.close_browser()
+    try:
+        await checker.close_browser()
+    except:
+        pass
     await close_db_pool()
     await bot.close()
 
@@ -509,5 +582,11 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         print("\n🛑 Остановка бота...")
     finally:
-        asyncio.run(checker.close_browser())
-        asyncio.run(close_db_pool())
+        try:
+            asyncio.run(checker.close_browser())
+        except:
+            pass
+        try:
+            asyncio.run(close_db_pool())
+        except:
+            pass
