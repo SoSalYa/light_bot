@@ -153,6 +153,14 @@ class DTEKChecker:
                           wait_until='networkidle', timeout=60000)
             await asyncio.sleep(3)
             
+            # DEBUG: Делаем скриншот начального состояния
+            print("DEBUG: Делаю скриншот начального состояния...")
+            try:
+                debug_screenshot = await page.screenshot(full_page=True)
+                print(f"DEBUG: Скриншот сделан, размер: {len(debug_screenshot)} байт")
+            except Exception as e:
+                print(f"DEBUG: Не удалось сделать скриншот: {e}")
+            
             # 2. Закрываем модальное окно (если есть)
             try:
                 print("Проверяю модальное окно...")
@@ -164,65 +172,159 @@ class DTEKChecker:
             except Exception as e:
                 print(f"Модальное окно не найдено или уже закрыто")
             
-            # 3. Вводим ЧАСТИЧНОЕ название города
+            # 3. Вводим ЧАСТИЧНОЕ название города (с повторными попытками)
             print("Ввожу город...")
             city_input = page.locator('.discon-input-wrapper #city')
             await city_input.wait_for(state='visible', timeout=10000)
-            await city_input.click()
-            await asyncio.sleep(0.5)
-            await city_input.fill('')  # Очищаем поле
-            await asyncio.sleep(0.5)
-            await city_input.type('книж', delay=150)
-            await asyncio.sleep(3)  # Ждем появления списка
             
-            # 4. Кликаем на ВТОРОЙ элемент из выпадающего списка
-            print("Выбираю из списка: с. Книжичі (Броварський)...")
-            city_option = page.locator('#cityautocomplete-list > div:nth-child(2)')
-            await city_option.wait_for(state='visible', timeout=10000)
-            await asyncio.sleep(0.5)
-            await city_option.click()
-            print("Город выбран")
-            await asyncio.sleep(2)
+            # Пробуем несколько раз, если список не появляется
+            city_selected = False
+            for attempt in range(3):
+                try:
+                    print(f"Попытка ввода города #{attempt + 1}...")
+                    
+                    # DEBUG: Скриншот перед вводом
+                    if attempt == 0:
+                        try:
+                            before_city = await page.screenshot()
+                            print(f"DEBUG: Скриншот перед вводом города, размер: {len(before_city)}")
+                        except:
+                            pass
+                    
+                    await city_input.click()
+                    await asyncio.sleep(0.5)
+                    await city_input.fill('')
+                    await asyncio.sleep(0.5)
+                    
+                    # Вводим текст медленно с триггером события
+                    await city_input.type('книж', delay=200)
+                    await city_input.press('ArrowDown')  # Триггерим выпадающий список
+                    await asyncio.sleep(3)
+                    
+                    # DEBUG: Проверяем HTML списка
+                    try:
+                        list_html = await page.locator('#cityautocomplete-list').inner_html()
+                        print(f"DEBUG: HTML списка города (первые 200 символов): {list_html[:200]}")
+                    except Exception as e:
+                        print(f"DEBUG: Не удалось получить HTML списка: {e}")
+                    
+                    # 4. Проверяем, появился ли список
+                    print("Ищу выпадающий список города...")
+                    city_list = page.locator('#cityautocomplete-list')
+                    await city_list.wait_for(state='visible', timeout=5000)
+                    
+                    # Кликаем на ВТОРОЙ элемент из списка
+                    print("Выбираю из списка: с. Книжичі (Броварський)...")
+                    city_option = page.locator('#cityautocomplete-list > div:nth-child(2)')
+                    await city_option.wait_for(state='visible', timeout=3000)
+                    await asyncio.sleep(0.5)
+                    await city_option.click()
+                    print("✓ Город выбран")
+                    city_selected = True
+                    await asyncio.sleep(2)
+                    break
+                except Exception as e:
+                    print(f"Попытка #{attempt + 1} не удалась: {e}")
+                    if attempt < 2:
+                        print("Пробую еще раз...")
+                        await asyncio.sleep(2)
+                    else:
+                        # Делаем финальный скриншот для дебага
+                        try:
+                            error_screenshot = await page.screenshot(full_page=True)
+                            print(f"DEBUG: Финальный скриншот ошибки, размер: {len(error_screenshot)}")
+                        except:
+                            pass
+                        raise Exception(f"Не удалось выбрать город после 3 попыток: {e}")
             
-            # 5. Вводим ЧАСТИЧНОЕ название улицы
+            if not city_selected:
+                raise Exception("Город не был выбран")
+            
+            # 5. Вводим ЧАСТИЧНОЕ название улицы (с повторными попытками)
             print("Ввожу улицу...")
             street_input = page.locator('.discon-input-wrapper #street')
             await street_input.wait_for(state='visible', timeout=10000)
-            await street_input.click()
-            await asyncio.sleep(0.5)
-            await street_input.fill('')
-            await asyncio.sleep(0.5)
-            await street_input.type('киї', delay=150)
-            await asyncio.sleep(3)
             
-            # 6. Кликаем на ВТОРОЙ элемент из выпадающего списка
-            print("Выбираю из списка: вул. Київська...")
-            street_option = page.locator('#streetautocomplete-list > div:nth-child(2)')
-            await street_option.wait_for(state='visible', timeout=10000)
-            await asyncio.sleep(0.5)
-            await street_option.click()
-            print("Улица выбрана")
-            await asyncio.sleep(2)
+            street_selected = False
+            for attempt in range(3):
+                try:
+                    print(f"Попытка ввода улицы #{attempt + 1}...")
+                    await street_input.click()
+                    await asyncio.sleep(0.5)
+                    await street_input.fill('')
+                    await asyncio.sleep(0.5)
+                    
+                    await street_input.type('киї', delay=200)
+                    await street_input.press('ArrowDown')
+                    await asyncio.sleep(3)
+                    
+                    # 6. Проверяем список
+                    print("Ищу выпадающий список улицы...")
+                    street_list = page.locator('#streetautocomplete-list')
+                    await street_list.wait_for(state='visible', timeout=5000)
+                    
+                    print("Выбираю из списка: вул. Київська...")
+                    street_option = page.locator('#streetautocomplete-list > div:nth-child(2)')
+                    await street_option.wait_for(state='visible', timeout=3000)
+                    await asyncio.sleep(0.5)
+                    await street_option.click()
+                    print("✓ Улица выбрана")
+                    street_selected = True
+                    await asyncio.sleep(2)
+                    break
+                except Exception as e:
+                    print(f"Попытка #{attempt + 1} не удалась: {e}")
+                    if attempt < 2:
+                        print("Пробую еще раз...")
+                        await asyncio.sleep(2)
+                    else:
+                        raise Exception(f"Не удалось выбрать улицу после 3 попыток: {e}")
             
-            # 7. Вводим номер дома полностью
+            if not street_selected:
+                raise Exception("Улица не была выбрана")
+            
+            # 7. Вводим номер дома полностью (с повторными попытками)
             print("Ввожу номер дома...")
             house_input = page.locator('input#house_num')
             await house_input.wait_for(state='visible', timeout=10000)
-            await house_input.click()
-            await asyncio.sleep(0.5)
-            await house_input.fill('')
-            await asyncio.sleep(0.5)
-            await house_input.type('168', delay=150)
-            await asyncio.sleep(3)
             
-            # 8. Кликаем на ПЕРВЫЙ элемент из выпадающего списка
-            print("Выбираю из списка: 168...")
-            house_option = page.locator('#house_numautocomplete-list > div:first-child')
-            await house_option.wait_for(state='visible', timeout=10000)
-            await asyncio.sleep(0.5)
-            await house_option.click()
-            print("Номер дома выбран")
-            await asyncio.sleep(4)
+            house_selected = False
+            for attempt in range(3):
+                try:
+                    print(f"Попытка ввода дома #{attempt + 1}...")
+                    await house_input.click()
+                    await asyncio.sleep(0.5)
+                    await house_input.fill('')
+                    await asyncio.sleep(0.5)
+                    
+                    await house_input.type('168', delay=200)
+                    await house_input.press('ArrowDown')
+                    await asyncio.sleep(3)
+                    
+                    # 8. Проверяем список
+                    print("Ищу выпадающий список дома...")
+                    house_list = page.locator('#house_numautocomplete-list')
+                    await house_list.wait_for(state='visible', timeout=5000)
+                    
+                    print("Выбираю из списка: 168...")
+                    house_option = page.locator('#house_numautocomplete-list > div:first-child')
+                    await house_option.wait_for(state='visible', timeout=3000)
+                    await asyncio.sleep(0.5)
+                    await house_option.click()
+                    print("✓ Номер дома выбран")
+                    house_selected = True
+                    await asyncio.sleep(4)
+                    break
+                except Exception as e:
+                    print(f"Попытка #{attempt + 1} не удалась: {e}")
+                    if attempt < 2:
+                        print("Пробую еще раз...")
+                        await asyncio.sleep(2)
+                    else:
+                        raise Exception(f"Не удалось выбрать дом после 3 попыток: {e}")
+            
+            if not house_selected:
+                raise Exception("Номер дома не был выбран")
             
             # 9. Получаем дату обновления из span.update
             print("Получаю дату обновления...")
@@ -345,11 +447,11 @@ async def check_schedule():
         
         # Выполняем проверку с таймаутом
         try:
-            result = await asyncio.wait_for(checker.check_shutdowns(), timeout=180)
+            result = await asyncio.wait_for(checker.check_shutdowns(), timeout=240)
             # Даем время на полное закрытие браузера
             await asyncio.sleep(2)
         except asyncio.TimeoutError:
-            print("❌ Таймаут проверки (180 секунд)")
+            print("❌ Таймаут проверки (240 секунд)")
             raise Exception("Проверка заняла слишком много времени")
         
         # Получаем последнюю проверку из БД
@@ -449,7 +551,7 @@ async def manual_check(ctx):
     
     try:
         # Даем немного больше времени для ручной проверки
-        result = await asyncio.wait_for(checker.check_shutdowns(), timeout=180)
+        result = await asyncio.wait_for(checker.check_shutdowns(), timeout=240)
         
         # Обновляем БД
         await save_check(result['update_date'])
@@ -498,7 +600,7 @@ async def manual_check(ctx):
     except asyncio.TimeoutError:
         error_embed = discord.Embed(
             title="⏱️ Таймаут",
-            description="Перевірка зайняла більше 3 хвилин. Спробуйте ще раз.",
+            description="Перевірка зайняла більше 4 хвилин. Спробуйте ще раз.",
             color=discord.Color.orange()
         )
         await ctx.send(embed=error_embed)
