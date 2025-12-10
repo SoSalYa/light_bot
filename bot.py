@@ -109,6 +109,9 @@ class DTEKChecker:
         except Exception as e:
             print(f"ℹ️ Модальное окно не найдено или уже закрыто")
         
+        # Закрываем модалку с опросом, если появилась
+        await self._close_survey_modal()
+        
         # Вводим данные адреса
         await self._fill_address()
         
@@ -213,6 +216,9 @@ class DTEKChecker:
         try:
             print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔄 Проверяю обновления...")
             
+            # Закрываем модалку с опросом, если появилась
+            await self._close_survey_modal()
+            
             # Получаем текущую дату обновления
             current_date = await self._get_update_date()
             
@@ -241,12 +247,36 @@ class DTEKChecker:
             await self.close_browser()
             raise
     
+    async def _close_survey_modal(self):
+        """Закрывает модальное окно с опросом, если оно появилось"""
+        try:
+            # Проверяем, появилось ли модальное окно с опросом
+            modal_container = self.page.locator('#modal-questionnaire-welcome-18 .modal__container')
+            
+            # Проверяем с коротким таймаутом (не ждем долго)
+            is_visible = await modal_container.is_visible()
+            
+            if is_visible:
+                print("  🔔 Обнаружено модальное окно с опросом, закрываю...")
+                close_btn = self.page.locator('#modal-questionnaire-welcome-7 .modal__close')
+                await close_btn.click()
+                await asyncio.sleep(1)
+                print("  ✓ Модальное окно с опросом закрыто")
+                return True
+        except Exception as e:
+            # Если модалки нет или ошибка - это нормально, просто игнорируем
+            pass
+        return False
+    
     async def _capture_screenshots(self, update_date):
         """Делает скриншоты обоих графиков"""
         print("📸 Делаю скриншоты...")
         
         # Ждем загрузки графика
         await asyncio.sleep(2)
+        
+        # Закрываем модалку с опросом, если появилась
+        await self._close_survey_modal()
         
         # Скриншот основного графика (сегодня)
         print("  → Скриншот сегодняшнего графика...")
@@ -268,15 +298,19 @@ class DTEKChecker:
             await date_selector.click()
             await asyncio.sleep(3)
             
+            # Закрываем модалку, если появилась после клика
+            await self._close_survey_modal()
+            
             print("  → Скриншот завтрашнего графика...")
             screenshot_tomorrow = await self.page.screenshot(full_page=True, type='png')
             screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
             
-            # Возвращаемся на первый график
+            # ВОЗВРАЩАЕМСЯ на первый график (сегодняшний)
             print("  → Возвращаюсь на сегодняшний график...")
             first_date_selector = self.page.locator('div.date:nth-child(1)')
             await first_date_selector.click()
             await asyncio.sleep(2)
+            print("  ✓ Вернулся на сегодняшний график")
             
         except Exception as e:
             print(f"⚠ Не удалось получить второй график: {e}")
@@ -303,7 +337,7 @@ class DTEKChecker:
         await self.page.reload(wait_until='domcontentloaded')
         await asyncio.sleep(2)
         
-        # Закрываем модалку, если есть
+        # Закрываем модалку с предупреждением, если есть
         try:
             close_btn = self.page.locator('button.m-attention__close')
             await close_btn.wait_for(state='visible', timeout=3000)
@@ -311,6 +345,9 @@ class DTEKChecker:
             await asyncio.sleep(1)
         except:
             pass
+        
+        # Закрываем модалку с опросом, если есть
+        await self._close_survey_modal()
         
         # Заполняем форму заново
         await self._fill_address()
@@ -571,6 +608,12 @@ async def bot_info(ctx):
     embed.add_field(
         name="🌐 Режим роботи",
         value=browser_status,
+        inline=True
+    )
+    
+    embed.add_field(
+        name="🛡️ Захист",
+        value="Автоматичне закриття модальних вікон та опитувань",
         inline=True
     )
     
