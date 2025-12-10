@@ -71,44 +71,26 @@ class DTEKChecker:
         
     async def init_browser(self):
         """Инициализация браузера"""
-        # Убеждаемся, что старый браузер закрыт
-        if self.playwright or self.browser or self.context:
-            await self.close_browser()
-        
-        self.playwright = await async_playwright().start()
-        self.browser = await self.playwright.chromium.launch(
-            headless=True,
-            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
-        )
-        self.context = await self.browser.new_context(
-            viewport={'width': 1920, 'height': 1080},
-            locale='uk-UA',
-            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-        )
-        print("✓ Браузер инициализирован")
+        if not self.playwright:
+            self.playwright = await async_playwright().start()
+            self.browser = await self.playwright.chromium.launch(
+                headless=True,
+                args=['--no-sandbox', '--disable-setuid-sandbox']
+            )
+            self.context = await self.browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                locale='uk-UA'
+            )
+            print("✓ Браузер инициализирован")
     
     async def close_browser(self):
         """Закрытие браузера"""
-        try:
-            if self.context:
-                await self.context.close()
-                self.context = None
-        except Exception as e:
-            print(f"Ошибка при закрытии контекста: {e}")
-        
-        try:
-            if self.browser:
-                await self.browser.close()
-                self.browser = None
-        except Exception as e:
-            print(f"Ошибка при закрытии браузера: {e}")
-        
-        try:
-            if self.playwright:
-                await self.playwright.stop()
-                self.playwright = None
-        except Exception as e:
-            print(f"Ошибка при остановке playwright: {e}")
+        if self.context:
+            await self.context.close()
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
     
     def crop_screenshot(self, screenshot_bytes, top_crop=300, bottom_crop=400, left_crop=0, right_crop=0):
         """Обрезает скриншот: убирает верх (шапку) и низ (футер)"""
@@ -137,10 +119,6 @@ class DTEKChecker:
     
     async def check_shutdowns(self):
         """Основная функция проверки отключений"""
-        # Закрываем старый браузер если есть
-        await self.close_browser()
-        
-        # Создаем новый браузер для каждой проверки
         await self.init_browser()
         page = await self.context.new_page()
         
@@ -169,16 +147,16 @@ class DTEKChecker:
             city_input = page.locator('.discon-input-wrapper #city')
             await city_input.wait_for(state='visible', timeout=5000)
             await city_input.click()
-            await city_input.fill('')
+            await city_input.clear()
             await city_input.type('книж', delay=100)
             
-            await city_input.dispatch_event('input')
-            await asyncio.sleep(2)
+            await city_input.dispatch_event('change')
+            await asyncio.sleep(1.5)
             
             # 4. Кликаем на ВТОРОЙ элемент из выпадающего списка
             print("Выбираю из списка: с. Книжичі (Броварський)...")
             city_option = page.locator('#cityautocomplete-list > div:nth-child(2)')
-            await city_option.wait_for(state='visible', timeout=7000)
+            await city_option.wait_for(state='visible', timeout=5000)
             await city_option.click()
             print("Город выбран")
             await asyncio.sleep(1)
@@ -188,16 +166,16 @@ class DTEKChecker:
             street_input = page.locator('.discon-input-wrapper #street')
             await street_input.wait_for(state='visible', timeout=5000)
             await street_input.click()
-            await street_input.fill('')
+            await street_input.clear()
             await street_input.type('киї', delay=100)
             
-            await street_input.dispatch_event('input')
-            await asyncio.sleep(2)
+            await street_input.dispatch_event('change')
+            await asyncio.sleep(1.5)
             
             # 6. Кликаем на ВТОРОЙ элемент из выпадающего списка
             print("Выбираю из списка: вул. Київська...")
             street_option = page.locator('#streetautocomplete-list > div:nth-child(2)')
-            await street_option.wait_for(state='visible', timeout=7000)
+            await street_option.wait_for(state='visible', timeout=5000)
             await street_option.click()
             print("Улица выбрана")
             await asyncio.sleep(1)
@@ -207,16 +185,16 @@ class DTEKChecker:
             house_input = page.locator('input#house_num')
             await house_input.wait_for(state='visible', timeout=5000)
             await house_input.click()
-            await house_input.fill('')
+            await house_input.clear()
             await house_input.type('168', delay=100)
             
-            await house_input.dispatch_event('input')
-            await asyncio.sleep(2)
+            await house_input.dispatch_event('change')
+            await asyncio.sleep(1.5)
             
             # 8. Кликаем на ПЕРВЫЙ элемент из выпадающего списка
             print("Выбираю из списка: 168...")
             house_option = page.locator('#house_numautocomplete-list > div:first-child')
-            await house_option.wait_for(state='visible', timeout=7000)
+            await house_option.wait_for(state='visible', timeout=5000)
             await house_option.click()
             print("Номер дома выбран")
             await asyncio.sleep(3)
@@ -269,8 +247,6 @@ class DTEKChecker:
                 second_date = None
             
             await page.close()
-            # Закрываем браузер после успешной проверки
-            await self.close_browser()
             
             return {
                 'screenshot_main': screenshot_main_cropped,
@@ -286,8 +262,6 @@ class DTEKChecker:
                 await page.close()
             except:
                 pass
-            # Закрываем браузер при ошибке
-            await self.close_browser()
             raise
 
 checker = DTEKChecker()
@@ -343,8 +317,6 @@ async def check_schedule():
         # Выполняем проверку с таймаутом
         try:
             result = await asyncio.wait_for(checker.check_shutdowns(), timeout=120)
-            # Даем время на полное закрытие браузера
-            await asyncio.sleep(2)
         except asyncio.TimeoutError:
             print("❌ Таймаут проверки (120 секунд)")
             raise Exception("Проверка заняла слишком много времени")
