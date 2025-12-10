@@ -71,26 +71,44 @@ class DTEKChecker:
         
     async def init_browser(self):
         """Инициализация браузера"""
-        if not self.playwright:
-            self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(
-                headless=True,
-                args=['--no-sandbox', '--disable-setuid-sandbox']
-            )
-            self.context = await self.browser.new_context(
-                viewport={'width': 1920, 'height': 1080},
-                locale='uk-UA',
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
-            )
+        # Убеждаемся, что старый браузер закрыт
+        if self.playwright or self.browser or self.context:
+            await self.close_browser()
+        
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-setuid-sandbox', '--disable-dev-shm-usage']
+        )
+        self.context = await self.browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            locale='uk-UA',
+            user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36'
+        )
+        print("✓ Браузер инициализирован")
     
     async def close_browser(self):
         """Закрытие браузера"""
-        if self.context:
-            await self.context.close()
-        if self.browser:
-            await self.browser.close()
-        if self.playwright:
-            await self.playwright.stop()
+        try:
+            if self.context:
+                await self.context.close()
+                self.context = None
+        except Exception as e:
+            print(f"Ошибка при закрытии контекста: {e}")
+        
+        try:
+            if self.browser:
+                await self.browser.close()
+                self.browser = None
+        except Exception as e:
+            print(f"Ошибка при закрытии браузера: {e}")
+        
+        try:
+            if self.playwright:
+                await self.playwright.stop()
+                self.playwright = None
+        except Exception as e:
+            print(f"Ошибка при остановке playwright: {e}")
     
     def crop_screenshot(self, screenshot_bytes, top_crop=300, bottom_crop=400, left_crop=0, right_crop=0):
         """Обрезает скриншот: убирает верх (шапку) и низ (футер)"""
@@ -119,6 +137,10 @@ class DTEKChecker:
     
     async def check_shutdowns(self):
         """Основная функция проверки отключений"""
+        # Закрываем старый браузер если есть
+        await self.close_browser()
+        
+        # Создаем новый браузер для каждой проверки
         await self.init_browser()
         page = await self.context.new_page()
         
@@ -250,6 +272,8 @@ class DTEKChecker:
                 second_date = None
             
             await page.close()
+            # Закрываем браузер после успешной проверки
+            await self.close_browser()
             
             return {
                 'screenshot_main': screenshot_main_cropped,
@@ -261,7 +285,12 @@ class DTEKChecker:
             
         except Exception as e:
             print(f"❌ Ошибка при проверке: {e}")
-            await page.close()
+            try:
+                await page.close()
+            except:
+                pass
+            # Закрываем браузер при ошибке
+            await self.close_browser()
             raise
 
 checker = DTEKChecker()
@@ -316,9 +345,11 @@ async def check_schedule():
         
         # Выполняем проверку с таймаутом
         try:
-            result = await asyncio.wait_for(checker.check_shutdowns(), timeout=120)
+            result = await asyncio.wait_for(checker.check_shutdowns(), timeout=180)
+            # Даем время на полное закрытие браузера
+            await asyncio.sleep(2)
         except asyncio.TimeoutError:
-            print("❌ Таймаут проверки (120 секунд)")
+            print("❌ Таймаут проверки (180 секунд)")
             raise Exception("Проверка заняла слишком много времени")
         
         # Получаем последнюю проверку из БД
@@ -393,14 +424,6 @@ async def check_schedule():
         import traceback
         traceback.print_exc()
         
-        # Пытаемся переинициализировать браузер при ошибке
-        try:
-            print("Переинициализирую браузер...")
-            await checker.close_browser()
-            await asyncio.sleep(5)
-        except:
-            pass
-        
         if channel:
             try:
                 error_embed = discord.Embed(
@@ -425,7 +448,8 @@ async def manual_check(ctx):
     await ctx.send("⏳ Починаю перевірку графіка відключень...")
     
     try:
-        result = await checker.check_shutdowns()
+        # Даем немного больше времени для ручной проверки
+        result = await asyncio.wait_for(checker.check_shutdowns(), timeout=180)
         
         # Обновляем БД
         await save_check(result['update_date'])
@@ -471,10 +495,21 @@ async def manual_check(ctx):
             
             await ctx.send(embed=embed_tomorrow, file=file_tomorrow)
         
+    except asyncio.TimeoutError:
+        error_embed = discord.Embed(
+            title="⏱️ Таймаут",
+            description="Перевірка зайняла більше 3 хвилин. Спробуйте ще раз.",
+            color=discord.Color.orange()
+        )
+        await ctx.send(embed=error_embed)
     except Exception as e:
+        import traceback
+        error_text = traceback.format_exc()
+        print(f"Ошибка в manual_check:\n{error_text}")
+        
         error_embed = discord.Embed(
             title="❌ Помилка",
-            description=f"```{str(e)}```",
+            description=f"```{str(e)[:500]}```",
             color=discord.Color.red()
         )
         await ctx.send(embed=error_embed)
@@ -500,19 +535,60 @@ async def bot_info(ctx):
         inline=True
     )
     
+    # Статус браузера
+    browser_status = "❌ Закритий"
+    if checker.playwright and checker.browser and checker.context:
+        browser_status = "⚠️ Відкритий (буде закрито перед наступною перевіркою)"
+    elif checker.browser:
+        browser_status = "⚠️ Частково відкритий"
+    
+    embed.add_field(
+        name="🌐 Статус браузера",
+        value=browser_status,
+        inline=True
+    )
+    
     last_check = await get_last_check()
     if last_check:
         embed.add_field(
             name="🕐 Остання перевірка",
             value=f"`{last_check.get('update_date', 'Невідомо')}`",
-            inline=True
+            inline=False
         )
     
     embed.add_field(
         name="📝 Доступні команди",
-        value="`!check` - Ручна перевірка\n`!info` - Інформація про бота\n`!stop` - Зупинити бота (тільки адміни)",
+        value="`!check` - Ручна перевірка\n`!info` - Інформація про бота\n`!status` - Детальний статус\n`!stop` - Зупинити бота (тільки адміни)",
         inline=False
     )
+    
+    await ctx.send(embed=embed)
+
+@bot.command(name='status')
+async def bot_status(ctx):
+    """Детальный статус бота для диагностики"""
+    embed = discord.Embed(
+        title="🔍 Детальний статус бота",
+        color=discord.Color.purple(),
+        timestamp=datetime.now()
+    )
+    
+    # Проверяем компоненты
+    playwright_status = "✅ Готовий" if not checker.playwright else "⚠️ Відкритий"
+    browser_status = "✅ Готовий" if not checker.browser else "⚠️ Відкритий"
+    context_status = "✅ Готовий" if not checker.context else "⚠️ Відкритий"
+    
+    embed.add_field(name="Playwright", value=playwright_status, inline=True)
+    embed.add_field(name="Browser", value=browser_status, inline=True)
+    embed.add_field(name="Context", value=context_status, inline=True)
+    
+    # Проверяем БД
+    db_status = "✅ Підключено" if db_pool else "❌ Не підключено"
+    embed.add_field(name="База даних", value=db_status, inline=False)
+    
+    # Проверяем задачу
+    task_status = "✅ Запущено" if check_schedule.is_running() else "❌ Зупинено"
+    embed.add_field(name="Автоматична перевірка", value=task_status, inline=False)
     
     await ctx.send(embed=embed)
 
@@ -522,7 +598,10 @@ async def stop_bot(ctx):
     """Остановка бота (только для администраторов)"""
     await ctx.send("🛑 Зупиняю бота...")
     check_schedule.cancel()
-    await checker.close_browser()
+    try:
+        await checker.close_browser()
+    except:
+        pass
     await close_db_pool()
     await bot.close()
 
@@ -534,5 +613,11 @@ if __name__ == '__main__':
     except KeyboardInterrupt:
         print("\n🛑 Остановка бота...")
     finally:
-        asyncio.run(checker.close_browser())
-        asyncio.run(close_db_pool())
+        try:
+            asyncio.run(checker.close_browser())
+        except:
+            pass
+        try:
+            asyncio.run(close_db_pool())
+        except:
+            pass
