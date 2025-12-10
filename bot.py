@@ -68,29 +68,118 @@ class DTEKChecker:
         self.browser = None
         self.context = None
         self.playwright = None
+        self.page = None
+        self.is_initialized = False
+        self.last_update_date = None
         
-    async def init_browser(self):
-        """Инициализация браузера"""
-        if not self.playwright:
-            self.playwright = await async_playwright().start()
-            self.browser = await self.playwright.chromium.launch(
-                headless=True,
-                args=['--no-sandbox', '--disable-setuid-sandbox']
-            )
-            self.context = await self.browser.new_context(
-                viewport={'width': 1920, 'height': 1080},
-                locale='uk-UA'
-            )
-            print("✓ Браузер инициализирован")
+    async def init_browser_and_page(self):
+        """Инициализация браузера и загрузка страницы ОДИН РАЗ"""
+        if self.is_initialized:
+            print("ℹ️ Браузер уже инициализирован, пропускаю...")
+            return
+            
+        print("🚀 Инициализирую браузер и загружаю страницу...")
+        
+        # Инициализация Playwright и браузера
+        self.playwright = await async_playwright().start()
+        self.browser = await self.playwright.chromium.launch(
+            headless=True,
+            args=['--no-sandbox', '--disable-setuid-sandbox']
+        )
+        self.context = await self.browser.new_context(
+            viewport={'width': 1920, 'height': 1080},
+            locale='uk-UA'
+        )
+        self.page = await self.context.new_page()
+        
+        # Открываем страницу
+        print("📄 Открываю страницу DTEK...")
+        await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', 
+                      wait_until='domcontentloaded', timeout=30000)
+        await asyncio.sleep(2)
+        
+        # Закрываем модальное окно (если есть)
+        try:
+            print("🔍 Проверяю модальное окно...")
+            close_btn = self.page.locator('button.m-attention__close')
+            await close_btn.wait_for(state='visible', timeout=5000)
+            await close_btn.click()
+            print("✓ Модальное окно закрыто")
+            await asyncio.sleep(1)
+        except Exception as e:
+            print(f"ℹ️ Модальное окно не найдено или уже закрыто")
+        
+        # Вводим данные адреса
+        await self._fill_address()
+        
+        # Получаем начальную дату обновления
+        self.last_update_date = await self._get_update_date()
+        print(f"✓ Начальная дата обновления: {self.last_update_date}")
+        
+        self.is_initialized = True
+        print("✅ Браузер и страница полностью инициализированы!")
     
-    async def close_browser(self):
-        """Закрытие браузера"""
-        if self.context:
-            await self.context.close()
-        if self.browser:
-            await self.browser.close()
-        if self.playwright:
-            await self.playwright.stop()
+    async def _fill_address(self):
+        """Заполняет форму с адресом"""
+        print("📝 Заполняю форму адреса...")
+        
+        # Вводим город
+        print("  → Ввожу город...")
+        city_input = self.page.locator('.discon-input-wrapper #city')
+        await city_input.wait_for(state='visible', timeout=5000)
+        await city_input.click()
+        await city_input.clear()
+        await city_input.type('книж', delay=100)
+        await city_input.dispatch_event('change')
+        await asyncio.sleep(1.5)
+        
+        city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
+        await city_option.wait_for(state='visible', timeout=5000)
+        await city_option.click()
+        await asyncio.sleep(1)
+        
+        # Вводим улицу
+        print("  → Ввожу улицу...")
+        street_input = self.page.locator('.discon-input-wrapper #street')
+        await street_input.wait_for(state='visible', timeout=5000)
+        await street_input.click()
+        await street_input.clear()
+        await street_input.type('киї', delay=100)
+        await street_input.dispatch_event('change')
+        await asyncio.sleep(1.5)
+        
+        street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
+        await street_option.wait_for(state='visible', timeout=5000)
+        await street_option.click()
+        await asyncio.sleep(1)
+        
+        # Вводим номер дома
+        print("  → Ввожу номер дома...")
+        house_input = self.page.locator('input#house_num')
+        await house_input.wait_for(state='visible', timeout=5000)
+        await house_input.click()
+        await house_input.clear()
+        await house_input.type('168', delay=100)
+        await house_input.dispatch_event('change')
+        await asyncio.sleep(1.5)
+        
+        house_option = self.page.locator('#house_numautocomplete-list > div:first-child')
+        await house_option.wait_for(state='visible', timeout=5000)
+        await house_option.click()
+        await asyncio.sleep(3)
+        
+        print("✓ Форма заполнена")
+    
+    async def _get_update_date(self):
+        """Получает дату обновления со страницы"""
+        try:
+            update_elem = self.page.locator('span.update')
+            await update_elem.wait_for(state='visible', timeout=10000)
+            update_date = await update_elem.text_content()
+            return update_date.strip()
+        except Exception as e:
+            print(f"⚠ Не удалось получить дату обновления: {e}")
+            return None
     
     def crop_screenshot(self, screenshot_bytes, top_crop=300, bottom_crop=400, left_crop=0, right_crop=0):
         """Обрезает скриншот: убирает верх (шапку) и низ (футер)"""
@@ -98,176 +187,161 @@ class DTEKChecker:
             image = Image.open(io.BytesIO(screenshot_bytes))
             width, height = image.size
             
-            # Вычисляем новые границы
             left = left_crop
             top = top_crop
             right = width - right_crop
             bottom = height - bottom_crop
             
-            print(f"Обрезаю скриншот: {width}x{height} -> {right-left}x{bottom-top}")
+            print(f"  📐 Обрезаю: {width}x{height} -> {right-left}x{bottom-top}")
             
-            # Обрезаем
             cropped = image.crop((left, top, right, bottom))
             
-            # Конвертируем обратно в bytes
             output = io.BytesIO()
             cropped.save(output, format='PNG', optimize=True, quality=95)
             return output.getvalue()
         except Exception as e:
-            print(f"⚠ Ошибка при обрезке скриншота: {e}")
+            print(f"⚠ Ошибка при обрезке: {e}")
             return screenshot_bytes
     
-    async def check_shutdowns(self):
-        """Основная функция проверки отключений"""
-        await self.init_browser()
-        page = await self.context.new_page()
+    async def check_for_updates(self):
+        """Проверяет, изменилась ли дата обновления на ОТКРЫТОЙ странице"""
+        if not self.is_initialized:
+            print("⚠️ Браузер не инициализирован! Инициализирую...")
+            await self.init_browser_and_page()
+            return None
         
         try:
-            print(f"[{datetime.now()}] Начинаю проверку...")
+            print(f"[{datetime.now().strftime('%H:%M:%S')}] 🔄 Проверяю обновления...")
             
-            # 1. Открываем страницу
-            print("Открываю страницу DTEK...")
-            await page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', 
-                          wait_until='domcontentloaded', timeout=30000)
-            await asyncio.sleep(2)
+            # Получаем текущую дату обновления
+            current_date = await self._get_update_date()
             
-            # 2. Закрываем модальное окно (если есть)
-            try:
-                print("Проверяю модальное окно...")
-                close_btn = page.locator('button.m-attention__close')
-                await close_btn.wait_for(state='visible', timeout=5000)
-                await close_btn.click()
-                print("Модальное окно закрыто")
-                await asyncio.sleep(1)
-            except Exception as e:
-                print(f"Модальное окно не найдено или уже закрыто")
+            if not current_date:
+                print("⚠️ Не удалось получить дату обновления")
+                return None
             
-            # 3. Вводим ЧАСТИЧНОЕ название города (как в Automa: "книж")
-            print("Ввожу город...")
-            city_input = page.locator('.discon-input-wrapper #city')
-            await city_input.wait_for(state='visible', timeout=5000)
-            await city_input.click()
-            await city_input.clear()
-            await city_input.type('книж', delay=100)
+            print(f"  📅 Текущая дата на сайте: {current_date}")
+            print(f"  📅 Последняя известная дата: {self.last_update_date}")
             
-            await city_input.dispatch_event('change')
-            await asyncio.sleep(1.5)
+            # Проверяем, изменилась ли дата
+            if current_date != self.last_update_date:
+                print("🔔 ОБНАРУЖЕНО ОБНОВЛЕНИЕ!")
+                self.last_update_date = current_date
+                
+                # Делаем скриншоты
+                return await self._capture_screenshots(current_date)
+            else:
+                print("✓ Изменений нет")
+                return None
+                
+        except Exception as e:
+            print(f"❌ Ошибка при проверке обновлений: {e}")
+            # При ошибке пытаемся переинициализировать
+            self.is_initialized = False
+            await self.close_browser()
+            raise
+    
+    async def _capture_screenshots(self, update_date):
+        """Делает скриншоты обоих графиков"""
+        print("📸 Делаю скриншоты...")
+        
+        # Ждем загрузки графика
+        await asyncio.sleep(2)
+        
+        # Скриншот основного графика (сегодня)
+        print("  → Скриншот сегодняшнего графика...")
+        screenshot_main = await self.page.screenshot(full_page=True, type='png')
+        screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
+        
+        # Кликаем на второй график (завтра)
+        screenshot_tomorrow_cropped = None
+        second_date = None
+        
+        try:
+            print("  → Переключаюсь на график завтра...")
+            date_selector = self.page.locator('div.date:nth-child(2)')
+            await date_selector.wait_for(state='visible', timeout=10000)
             
-            # 4. Кликаем на ВТОРОЙ элемент из выпадающего списка
-            print("Выбираю из списка: с. Книжичі (Броварський)...")
-            city_option = page.locator('#cityautocomplete-list > div:nth-child(2)')
-            await city_option.wait_for(state='visible', timeout=5000)
-            await city_option.click()
-            print("Город выбран")
-            await asyncio.sleep(1)
+            second_date = await date_selector.text_content()
+            second_date = second_date.strip()
             
-            # 5. Вводим ЧАСТИЧНОЕ название улицы (как в Automa: "киї")
-            print("Ввожу улицу...")
-            street_input = page.locator('.discon-input-wrapper #street')
-            await street_input.wait_for(state='visible', timeout=5000)
-            await street_input.click()
-            await street_input.clear()
-            await street_input.type('киї', delay=100)
-            
-            await street_input.dispatch_event('change')
-            await asyncio.sleep(1.5)
-            
-            # 6. Кликаем на ВТОРОЙ элемент из выпадающего списка
-            print("Выбираю из списка: вул. Київська...")
-            street_option = page.locator('#streetautocomplete-list > div:nth-child(2)')
-            await street_option.wait_for(state='visible', timeout=5000)
-            await street_option.click()
-            print("Улица выбрана")
-            await asyncio.sleep(1)
-            
-            # 7. Вводим номер дома полностью (как в Automa: "168")
-            print("Ввожу номер дома...")
-            house_input = page.locator('input#house_num')
-            await house_input.wait_for(state='visible', timeout=5000)
-            await house_input.click()
-            await house_input.clear()
-            await house_input.type('168', delay=100)
-            
-            await house_input.dispatch_event('change')
-            await asyncio.sleep(1.5)
-            
-            # 8. Кликаем на ПЕРВЫЙ элемент из выпадающего списка
-            print("Выбираю из списка: 168...")
-            house_option = page.locator('#house_numautocomplete-list > div:first-child')
-            await house_option.wait_for(state='visible', timeout=5000)
-            await house_option.click()
-            print("Номер дома выбран")
+            await date_selector.click()
             await asyncio.sleep(3)
             
-            # 9. Получаем дату обновления из span.update
-            print("Получаю дату обновления...")
-            update_date = None
-            try:
-                update_elem = page.locator('span.update')
-                await update_elem.wait_for(state='visible', timeout=10000)
-                update_date = await update_elem.text_content()
-                update_date = update_date.strip()
-                print(f"✓ Дата обновления: {update_date}")
-            except Exception as e:
-                print(f"⚠ Не удалось получить дату обновления: {e}")
-                update_date = "Невідомо"
+            print("  → Скриншот завтрашнего графика...")
+            screenshot_tomorrow = await self.page.screenshot(full_page=True, type='png')
+            screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
             
-            # Ждем полной загрузки графика
-            await asyncio.sleep(1)
-            
-            # 10. Делаем полноразмерный скриншот страницы (основной график)
-            print("Делаю скриншот основного графика...")
-            screenshot_main = await page.screenshot(full_page=True, type='png')
-            screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
-            print("✓ Скриншот основного графика готов и обрезан")
-            
-            # 11. Кликаем на второй элемент div.date для второго графика
-            print("Кликаю на второй график (завтра)...")
-            second_date = None
-            try:
-                date_selector = page.locator('div.date:nth-child(2)')
-                await date_selector.wait_for(state='visible', timeout=10000)
-                
-                # Получаем текст даты перед кликом
-                second_date = await date_selector.text_content()
-                second_date = second_date.strip()
-                print(f"Дата второго графика: {second_date}")
-                
-                await date_selector.click()
-                await asyncio.sleep(4)  # Ждем загрузки графика
-                
-                # 12. Делаем второй скриншот
-                print("Делаю скриншот второго графика...")
-                screenshot_tomorrow = await page.screenshot(full_page=True, type='png')
-                screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
-                print("✓ Скриншот второго графика готов и обрезан")
-            except Exception as e:
-                print(f"⚠ Не удалось получить второй график: {e}")
-                screenshot_tomorrow_cropped = None
-                second_date = None
-            
-            await page.close()
-            
-            return {
-                'screenshot_main': screenshot_main_cropped,
-                'screenshot_tomorrow': screenshot_tomorrow_cropped,
-                'update_date': update_date,
-                'second_date': second_date,
-                'timestamp': datetime.now().isoformat()
-            }
+            # Возвращаемся на первый график
+            print("  → Возвращаюсь на сегодняшний график...")
+            first_date_selector = self.page.locator('div.date:nth-child(1)')
+            await first_date_selector.click()
+            await asyncio.sleep(2)
             
         except Exception as e:
-            print(f"❌ Ошибка при проверке: {e}")
-            try:
-                await page.close()
-            except:
-                pass
-            raise
+            print(f"⚠ Не удалось получить второй график: {e}")
+        
+        print("✅ Скриншоты готовы!")
+        
+        return {
+            'screenshot_main': screenshot_main_cropped,
+            'screenshot_tomorrow': screenshot_tomorrow_cropped,
+            'update_date': update_date,
+            'second_date': second_date,
+            'timestamp': datetime.now().isoformat()
+        }
+    
+    async def force_reload(self):
+        """Принудительная перезагрузка страницы (для ручной команды)"""
+        print("🔄 Принудительная перезагрузка страницы...")
+        
+        if not self.is_initialized:
+            await self.init_browser_and_page()
+            return await self._capture_screenshots(self.last_update_date)
+        
+        # Перезагружаем страницу
+        await self.page.reload(wait_until='domcontentloaded')
+        await asyncio.sleep(2)
+        
+        # Закрываем модалку, если есть
+        try:
+            close_btn = self.page.locator('button.m-attention__close')
+            await close_btn.wait_for(state='visible', timeout=3000)
+            await close_btn.click()
+            await asyncio.sleep(1)
+        except:
+            pass
+        
+        # Заполняем форму заново
+        await self._fill_address()
+        
+        # Получаем дату и делаем скриншоты
+        update_date = await self._get_update_date()
+        self.last_update_date = update_date
+        
+        return await self._capture_screenshots(update_date)
+    
+    async def close_browser(self):
+        """Закрытие браузера"""
+        print("🔻 Закрываю браузер...")
+        try:
+            if self.page:
+                await self.page.close()
+            if self.context:
+                await self.context.close()
+            if self.browser:
+                await self.browser.close()
+            if self.playwright:
+                await self.playwright.stop()
+            self.is_initialized = False
+            print("✓ Браузер закрыт")
+        except Exception as e:
+            print(f"⚠ Ошибка при закрытии браузера: {e}")
 
 checker = DTEKChecker()
 
 async def get_last_check():
-    """Получает данные последней проверки из БД через Session Pooler"""
+    """Получает данные последней проверки из БД"""
     try:
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -280,7 +354,7 @@ async def get_last_check():
     return None
 
 async def save_check(update_date):
-    """Сохраняет данные проверки в БД через Session Pooler"""
+    """Сохраняет данные проверки в БД"""
     try:
         async with db_pool.acquire() as conn:
             await conn.execute(
@@ -298,11 +372,13 @@ async def on_ready():
     print(f'✓ Интервал проверки: каждые 5 минут')
     await init_db_pool()
     await start_web_server()
+    # Инициализируем браузер сразу при старте
+    await checker.init_browser_and_page()
     check_schedule.start()
 
 @tasks.loop(minutes=5)
 async def check_schedule():
-    """Периодическая проверка каждые 5 минут"""
+    """Периодическая проверка каждые 5 минут (БЕЗ перезагрузки страницы!)"""
     channel = None
     try:
         channel = bot.get_channel(CHANNEL_ID)
@@ -310,83 +386,70 @@ async def check_schedule():
             print(f"❌ Канал {CHANNEL_ID} не найден!")
             return
         
-        print(f"\n{'='*50}")
-        print(f"[{datetime.now()}] Запуск автоматической проверки...")
-        print(f"{'='*50}")
+        print(f"\n{'='*60}")
+        print(f"[{datetime.now().strftime('%Y-%m-%d %H:%M:%S')}] 🔍 Автопроверка")
+        print(f"{'='*60}")
         
-        # Выполняем проверку с таймаутом
-        try:
-            result = await asyncio.wait_for(checker.check_shutdowns(), timeout=120)
-        except asyncio.TimeoutError:
-            print("❌ Таймаут проверки (120 секунд)")
-            raise Exception("Проверка заняла слишком много времени")
+        # Просто проверяем обновления на открытой странице
+        result = await checker.check_for_updates()
         
-        # Получаем последнюю проверку из БД
-        last_check = await get_last_check()
+        # Если обновлений нет, result будет None
+        if not result:
+            print(f"{'='*60}\n")
+            return
         
-        # Проверяем, изменилась ли дата обновления
-        is_updated = False
-        if not last_check or last_check.get('update_date') != result['update_date']:
-            is_updated = True
-            await save_check(result['update_date'])
-            print(f"🔔 ИНФОРМАЦИЯ ОБНОВИЛАСЬ! Старая дата: {last_check.get('update_date') if last_check else 'отсутствует'}, Новая: {result['update_date']}")
-        else:
-            print(f"ℹ️ Без изменений. Дата обновления: {result['update_date']}")
+        # Если есть обновления - сохраняем в БД
+        await save_check(result['update_date'])
         
-        # Отправляем сообщение только если есть обновление
-        if is_updated:
-            # Формируем embed сообщение
-            embed = discord.Embed(
-                title="⚡ Графік відключень ДТЕК Київські регіональні електромережі",
-                description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
-                color=discord.Color.orange(),
+        # Отправляем уведомление
+        embed = discord.Embed(
+            title="⚡ Графік відключень ДТЕК Київські регіональні електромережі",
+            description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
+            color=discord.Color.orange(),
+            timestamp=datetime.now()
+        )
+        
+        if result['update_date']:
+            embed.add_field(
+                name="🕐 Дата оновлення на сайті",
+                value=f"`{result['update_date']}`",
+                inline=False
+            )
+        
+        embed.add_field(
+            name="✅ Статус",
+            value="**🔔 ІНФОРМАЦІЯ ОНОВИЛАСЬ!**",
+            inline=False
+        )
+        embed.set_footer(text="Нова інформація • Автоматична перевірка")
+        
+        # Отправляем основной скриншот
+        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+        file_main = discord.File(
+            io.BytesIO(result['screenshot_main']), 
+            filename=f"dtek_today_{timestamp_str}.png"
+        )
+        
+        await channel.send(embed=embed, file=file_main)
+        
+        # Отправляем второй скриншот, если есть
+        if result['screenshot_tomorrow']:
+            embed_tomorrow = discord.Embed(
+                title="📅 Графік відключень на завтра",
+                description=f"**📍 Адреса:** с. Книжичі, вул. Київська, 168\n**📆 Дата:** {result['second_date'] or 'Завтра'}",
+                color=discord.Color.blue(),
                 timestamp=datetime.now()
             )
             
-            if result['update_date']:
-                embed.add_field(
-                    name="🕐 Дата оновлення на сайті",
-                    value=f"`{result['update_date']}`",
-                    inline=False
-                )
-            
-            embed.add_field(
-                name="✅ Статус",
-                value="**🔔 ІНФОРМАЦІЯ ОНОВИЛАСЬ!**",
-                inline=False
-            )
-            embed.set_footer(text="Нова інформація • Автоматична перевірка")
-            
-            # Отправляем основной скриншот (сегодня)
-            timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-            file_main = discord.File(
-                io.BytesIO(result['screenshot_main']), 
-                filename=f"dtek_today_{timestamp_str}.png"
+            file_tomorrow = discord.File(
+                io.BytesIO(result['screenshot_tomorrow']), 
+                filename=f"dtek_tomorrow_{timestamp_str}.png"
             )
             
-            await channel.send(embed=embed, file=file_main)
-            
-            # Отправляем второй скриншот (завтра), если есть
-            if result['screenshot_tomorrow']:
-                embed_tomorrow = discord.Embed(
-                    title="📅 Графік відключень на завтра",
-                    description=f"**📍 Адреса:** с. Книжичі, вул. Київська, 168\n**📆 Дата:** {result['second_date'] or 'Завтра'}",
-                    color=discord.Color.blue(),
-                    timestamp=datetime.now()
-                )
-                
-                file_tomorrow = discord.File(
-                    io.BytesIO(result['screenshot_tomorrow']), 
-                    filename=f"dtek_tomorrow_{timestamp_str}.png"
-                )
-                
-                await channel.send(embed=embed_tomorrow, file=file_tomorrow)
-            
-            print(f"✓ Сообщение отправлено в Discord (обновление: {is_updated})")
-        else:
-            print(f"ℹ️ Изменений нет, сообщение не отправлено")
+            await channel.send(embed=embed_tomorrow, file=file_tomorrow)
         
-        print(f"{'='*50}\n")
+        print(f"✅ Уведомление отправлено!")
+        print(f"{'='*60}\n")
         
     except Exception as e:
         print(f"❌ Ошибка в check_schedule: {e}")
@@ -413,12 +476,12 @@ async def before_check_schedule():
 
 @bot.command(name='check')
 async def manual_check(ctx):
-    """Ручная проверка по команде !check"""
+    """Ручная проверка по команде !check (с принудительной перезагрузкой)"""
     await ctx.send("⏳ Починаю перевірку графіка відключень...")
     
     try:
-        # Даем немного больше времени для ручной проверки
-        result = await asyncio.wait_for(checker.check_shutdowns(), timeout=120)
+        # Принудительная перезагрузка страницы
+        result = await asyncio.wait_for(checker.force_reload(), timeout=120)
         
         # Обновляем БД
         await save_check(result['update_date'])
@@ -439,7 +502,7 @@ async def manual_check(ctx):
         
         embed.set_footer(text="Ручна перевірка • Запущено командою !check")
         
-        # Отправляем основной скриншот
+        # Отправляем скриншоты
         timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
         file_main = discord.File(
             io.BytesIO(result['screenshot_main']), 
@@ -448,7 +511,6 @@ async def manual_check(ctx):
         
         await ctx.send(embed=embed, file=file_main)
         
-        # Отправляем второй скриншот, если есть
         if result['screenshot_tomorrow']:
             embed_tomorrow = discord.Embed(
                 title="📅 Графік відключень на завтра",
@@ -504,30 +566,24 @@ async def bot_info(ctx):
         inline=True
     )
     
-    # Статус браузера
-    browser_status = "❌ Закритий"
-    if checker.playwright and checker.browser and checker.context:
-        browser_status = "⚠️ Відкритий (буде закрито перед наступною перевіркою)"
-    elif checker.browser:
-        browser_status = "⚠️ Частково відкритий"
+    browser_status = "✅ Постійно відкритий (економія запитів)" if checker.is_initialized else "❌ Не ініціалізований"
     
     embed.add_field(
-        name="🌐 Статус браузера",
+        name="🌐 Режим роботи",
         value=browser_status,
         inline=True
     )
     
-    last_check = await get_last_check()
-    if last_check:
+    if checker.last_update_date:
         embed.add_field(
-            name="🕐 Остання перевірка",
-            value=f"`{last_check.get('update_date', 'Невідомо')}`",
+            name="🕐 Поточна дата на сайті",
+            value=f"`{checker.last_update_date}`",
             inline=False
         )
     
     embed.add_field(
         name="📝 Доступні команди",
-        value="`!check` - Ручна перевірка\n`!info` - Інформація про бота\n`!status` - Детальний статус\n`!stop` - Зупинити бота (тільки адміни)",
+        value="`!check` - Ручна перевірка з перезавантаженням\n`!info` - Інформація про бота\n`!status` - Детальний статус\n`!restart` - Перезапустити браузер\n`!stop` - Зупинити бота (тільки адміни)",
         inline=False
     )
     
@@ -535,48 +591,60 @@ async def bot_info(ctx):
 
 @bot.command(name='status')
 async def bot_status(ctx):
-    """Детальный статус бота для диагностики"""
+    """Детальный статус бота"""
     embed = discord.Embed(
         title="🔍 Детальний статус бота",
         color=discord.Color.purple(),
         timestamp=datetime.now()
     )
     
-    # Проверяем компоненты
-    playwright_status = "✅ Готовий" if not checker.playwright else "⚠️ Відкритий"
-    browser_status = "✅ Готовий" if not checker.browser else "⚠️ Відкритий"
-    context_status = "✅ Готовий" if not checker.context else "⚠️ Відкритий"
+    # Статус браузера
+    browser_status = "✅ Відкритий і готовий" if checker.is_initialized else "❌ Не ініціалізований"
+    embed.add_field(name="🌐 Браузер", value=browser_status, inline=True)
     
-    embed.add_field(name="Playwright", value=playwright_status, inline=True)
-    embed.add_field(name="Browser", value=browser_status, inline=True)
-    embed.add_field(name="Context", value=context_status, inline=True)
+    # Статус страницы
+    page_status = "✅ Завантажено" if checker.page else "❌ Не завантажено"
+    embed.add_field(name="📄 Сторінка", value=page_status, inline=True)
     
-    # Проверяем БД
+    # Последняя дата
+    last_date = checker.last_update_date or "Невідомо"
+    embed.add_field(name="📅 Остання дата на сайті", value=f"`{last_date}`", inline=False)
+    
+    # БД
     db_status = "✅ Підключено" if db_pool else "❌ Не підключено"
-    embed.add_field(name="База даних", value=db_status, inline=False)
+    embed.add_field(name="💾 База даних", value=db_status, inline=True)
     
-    # Проверяем задачу
+    # Задача
     task_status = "✅ Запущено" if check_schedule.is_running() else "❌ Зупинено"
-    embed.add_field(name="Автоматична перевірка", value=task_status, inline=False)
+    embed.add_field(name="⏱️ Автоперевірка", value=task_status, inline=True)
     
     await ctx.send(embed=embed)
+
+@bot.command(name='restart')
+async def restart_browser(ctx):
+    """Перезапуск браузера"""
+    await ctx.send("🔄 Перезапускаю браузер...")
+    try:
+        await checker.close_browser()
+        await asyncio.sleep(2)
+        await checker.init_browser_and_page()
+        await ctx.send("✅ Браузер перезапущено успішно!")
+    except Exception as e:
+        await ctx.send(f"❌ Помилка при перезапуску: {str(e)[:200]}")
 
 @bot.command(name='stop')
 @commands.has_permissions(administrator=True)
 async def stop_bot(ctx):
-    """Остановка бота (только для администраторов)"""
+    """Остановка бота"""
     await ctx.send("🛑 Зупиняю бота...")
     check_schedule.cancel()
-    try:
-        await checker.close_browser()
-    except:
-        pass
+    await checker.close_browser()
     await close_db_pool()
     await bot.close()
 
 if __name__ == '__main__':
     try:
-        print("🤖 Запуск Discord бота DTEK...")
+        print("🤖 Запуск Discord бота DTEK (режим постоянного браузера)...")
         print(f"📅 Дата: {datetime.now()}")
         bot.run(DISCORD_TOKEN)
     except KeyboardInterrupt:
