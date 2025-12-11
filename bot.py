@@ -8,6 +8,7 @@ import io
 import asyncpg
 from PIL import Image
 from aiohttp import web
+import random
 
 # Конфигурация
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
@@ -70,20 +71,86 @@ class DTEKChecker:
         self.playwright = None
         self.page = None  # Добавлено: храним страницу
         self.last_update_date = None  # Добавлено: храним последнюю дату
+    
+    async def _random_delay(self, min_ms=100, max_ms=500):
+        """Случайная задержка для имитации человека"""
+        await asyncio.sleep(random.uniform(min_ms/1000, max_ms/1000))
+    
+    async def _human_move_and_click(self, locator):
+        """Клик с имитацией движения мышкой как у человека"""
+        try:
+            # Получаем позицию элемента
+            box = await locator.bounding_box()
+            if box:
+                # Случайная точка внутри элемента
+                x = box['x'] + random.uniform(box['width'] * 0.3, box['width'] * 0.7)
+                y = box['y'] + random.uniform(box['height'] * 0.3, box['height'] * 0.7)
+                
+                # Двигаем мышку с небольшими отклонениями
+                await self.page.mouse.move(x + random.uniform(-5, 5), y + random.uniform(-5, 5))
+                await self._random_delay(50, 150)
+                
+            await locator.click()
+        except:
+            # Если не получилось с движением, просто кликаем
+            await locator.click()
+    
+    async def _human_type(self, locator, text):
+        """Ввод текста с человеческой скоростью"""
+        await locator.click()
+        await self._random_delay(100, 300)
         
+        for char in text:
+            await locator.press_sequentially(char, delay=random.uniform(50, 150))
+            
     async def init_browser(self):
         """Инициализация браузера и открытие страницы ОДИН РАЗ"""
         if not self.playwright:
             self.playwright = await async_playwright().start()
+            
+            # Запускаем браузер с настройками для обхода детекции
             self.browser = await self.playwright.chromium.launch(
                 headless=True,
-                args=['--no-sandbox', '--disable-setuid-sandbox']
+                args=[
+                    '--no-sandbox',
+                    '--disable-setuid-sandbox',
+                    '--disable-blink-features=AutomationControlled',
+                    '--disable-dev-shm-usage',
+                    '--disable-web-security',
+                ]
             )
+            
+            # Создаем контекст с реальными параметрами браузера
             self.context = await self.browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
-                locale='uk-UA'
+                locale='uk-UA',
+                timezone_id='Europe/Kiev',
+                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                extra_http_headers={
+                    'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7',
+                }
             )
-            print("✓ Браузер инициализирован")
+            
+            # Скрываем признаки автоматизации
+            await self.context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', {
+                    get: () => undefined
+                });
+                
+                window.navigator.chrome = {
+                    runtime: {}
+                };
+                
+                Object.defineProperty(navigator, 'plugins', {
+                    get: () => [1, 2, 3, 4, 5]
+                });
+                
+                Object.defineProperty(navigator, 'languages', {
+                    get: () => ['uk-UA', 'uk', 'en-US', 'en']
+                });
+            """)
+            
+            print("✓ Браузер инициализирован с защитой от детекции")
             
             # Создаем страницу и заполняем форму один раз
             self.page = await self.context.new_page()
@@ -96,17 +163,39 @@ class DTEKChecker:
         # 1. Открываем страницу
         print("Открываю страницу DTEK...")
         await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', 
-                      wait_until='domcontentloaded', timeout=30000)
-        await asyncio.sleep(2)
+                      wait_until='networkidle', timeout=60000)
+        
+        # Ждем естественное время как человек
+        await self._random_delay(2000, 4000)
+        
+        # Проверяем наличие капчи hCaptcha
+        try:
+            print("Проверяю наличие капчи...")
+            captcha_frame = self.page.frame_locator('iframe[src*="hcaptcha"]').first
+            if await captcha_frame.locator('body').count() > 0:
+                print("⚠️ Обнаружена капча! Жду её прохождения...")
+                # Ждем до 30 секунд, пока капча не исчезнет
+                for i in range(30):
+                    await asyncio.sleep(1)
+                    if await captcha_frame.locator('body').count() == 0:
+                        print("✓ Капча пройдена или исчезла")
+                        break
+                    if i == 29:
+                        print("⚠️ Капча не исчезла за 30 секунд, пробую продолжить...")
+        except Exception as e:
+            print(f"Капча не обнаружена или уже пройдена")
+        
+        # Небольшая пауза после проверки капчи
+        await self._random_delay(1000, 2000)
         
         # 2. Закрываем модальное окно с предупреждением (если есть)
         try:
             print("Проверяю модальное окно с предупреждением...")
             close_btn = self.page.locator('button.m-attention__close')
-            await close_btn.wait_for(state='visible', timeout=5000)
-            await close_btn.click()
-            print("Модальное окно с предупреждением закрыто")
-            await asyncio.sleep(1)
+            if await close_btn.count() > 0:
+                await self._human_move_and_click(close_btn)
+                print("Модальное окно с предупреждением закрыто")
+                await self._random_delay(500, 1000)
         except Exception as e:
             print(f"Модальное окно с предупреждением не найдено")
         
@@ -114,75 +203,83 @@ class DTEKChecker:
         try:
             print("Проверяю окно с опросом...")
             survey_close = self.page.locator('#modal-questionnaire-welcome-7 .modal__close')
-            await survey_close.wait_for(state='visible', timeout=3000)
-            await survey_close.click()
-            print("Окно с опросом закрыто")
-            await asyncio.sleep(1)
+            if await survey_close.count() > 0:
+                await self._human_move_and_click(survey_close)
+                print("Окно с опросом закрыто")
+                await self._random_delay(500, 1000)
         except Exception as e:
             print(f"Окно с опросом не найдено")
         
         # 3. Вводим ЧАСТИЧНОЕ название города: "княж"
         print("Ввожу город...")
         city_input = self.page.locator('.discon-input-wrapper #city')
-        await city_input.wait_for(state='visible', timeout=5000)
-        await city_input.click()
+        await city_input.wait_for(state='visible', timeout=10000)
+        
+        # Двигаем мышку к полю
+        await self._human_move_and_click(city_input)
+        await self._random_delay(200, 400)
         await city_input.clear()
-        await city_input.type('княж', delay=100)
+        await self._random_delay(100, 300)
+        await self._human_type(city_input, 'княж')
         
         await city_input.dispatch_event('change')
-        await asyncio.sleep(1.5)
+        await self._random_delay(1500, 2500)
         
         # 4. Кликаем на ВТОРОЙ элемент из выпадающего списка
         print("Выбираю из списка: с. Книжичі (Броварський)...")
         city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
-        await city_option.wait_for(state='visible', timeout=5000)
-        await city_option.click()
+        await city_option.wait_for(state='visible', timeout=10000)
+        await self._human_move_and_click(city_option)
         print("Город выбран")
-        await asyncio.sleep(1)
+        await self._random_delay(800, 1500)
         
         # 5. Вводим ЧАСТИЧНОЕ название улицы (как в Automa: "киї")
         print("Ввожу улицу...")
         street_input = self.page.locator('.discon-input-wrapper #street')
-        await street_input.wait_for(state='visible', timeout=5000)
-        await street_input.click()
+        await street_input.wait_for(state='visible', timeout=10000)
+        await self._human_move_and_click(street_input)
+        await self._random_delay(200, 400)
         await street_input.clear()
-        await street_input.type('киї', delay=100)
+        await self._random_delay(100, 300)
+        await self._human_type(street_input, 'киї')
         
         await street_input.dispatch_event('change')
-        await asyncio.sleep(1.5)
+        await self._random_delay(1500, 2500)
         
         # 6. Кликаем на ВТОРОЙ элемент из выпадающего списка
         print("Выбираю из списка: вул. Київська...")
         street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
-        await street_option.wait_for(state='visible', timeout=5000)
-        await street_option.click()
+        await street_option.wait_for(state='visible', timeout=10000)
+        await self._human_move_and_click(street_option)
         print("Улица выбрана")
-        await asyncio.sleep(1)
+        await self._random_delay(800, 1500)
         
         # 7. Вводим номер дома полностью (как в Automa: "168")
         print("Ввожу номер дома...")
         house_input = self.page.locator('input#house_num')
-        await house_input.wait_for(state='visible', timeout=5000)
-        await house_input.click()
+        await house_input.wait_for(state='visible', timeout=10000)
+        await self._human_move_and_click(house_input)
+        await self._random_delay(200, 400)
         await house_input.clear()
-        await house_input.type('168', delay=100)
+        await self._random_delay(100, 300)
+        await self._human_type(house_input, '168')
         
         await house_input.dispatch_event('change')
-        await asyncio.sleep(1.5)
+        await self._random_delay(1500, 2500)
         
         # 8. Кликаем на ПЕРВЫЙ элемент из выпадающего списка
         print("Выбираю из списка: 168...")
         house_option = self.page.locator('#house_numautocomplete-list > div:first-child')
-        await house_option.wait_for(state='visible', timeout=5000)
-        await house_option.click()
+        await house_option.wait_for(state='visible', timeout=10000)
+        await self._human_move_and_click(house_option)
         print("Номер дома выбран")
-        await asyncio.sleep(3)
+        await self._random_delay(2000, 3000)
         
         # 9. Получаем начальную дату обновления
         print("Получаю дату обновления...")
         try:
             update_elem = self.page.locator('span.update')
-            await update_elem.wait_for(state='visible', timeout=10000)
+            await update_elem.wait_for(state='visible', timeout=15000)
             self.last_update_date = await update_elem.text_content()
             self.last_update_date = self.last_update_date.strip()
             print(f"✓ Дата обновления: {self.last_update_date}")
