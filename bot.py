@@ -813,67 +813,81 @@ class DTEKChecker:
             return screenshot_bytes
     
     async def make_screenshots(self):
-    """Делает скриншоты"""
-    try:
-        await self._close_survey_if_present()
-        await asyncio.sleep(1)
-        
-        print("Делаю скриншот основного графика...")
-        # ИЗМЕНЕНИЕ 1: Добавлен таймаут для скриншота
-        screenshot_main = await asyncio.wait_for(
-            self.page.screenshot(full_page=True, type='png'),
-            timeout=30
-        )
-        screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
-        print("✓ Скриншот основного графика готов")
-        
-        print("Кликаю на второй график (завтра)...")
-        second_date = None
-        screenshot_tomorrow_cropped = None
+        """Делает скриншоты"""
         try:
-            date_selector = self.page.locator('div.date:nth-child(2)')
-            # ИЗМЕНЕНИЕ 2: Увеличен таймаут с 10000 до 15000
-            await date_selector.wait_for(state='visible', timeout=15000)
-            
-            second_date = await date_selector.text_content()
-            second_date = second_date.strip()
-            print(f"Дата второго графика: {second_date}")
-            
-            await date_selector.click()
-            # ИЗМЕНЕНИЕ 3: Увеличена задержка с 4 до 5 секунд
-            await asyncio.sleep(5)
-            
             await self._close_survey_if_present()
+            await asyncio.sleep(1)
             
-            print("Делаю скриншот второго графика...")
-            # ИЗМЕНЕНИЕ 4: Добавлен таймаут для скриншота
-            screenshot_tomorrow = await asyncio.wait_for(
+            print("Делаю скриншот основного графика...")
+            screenshot_main = await asyncio.wait_for(
                 self.page.screenshot(full_page=True, type='png'),
                 timeout=30
             )
-            screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
-            print("✓ Скриншот второго графика готов")
+            screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
+            print("✓ Скриншот основного графика готов")
             
-            print("Возвращаюсь на первый график...")
-            first_date = self.page.locator('div.date:nth-child(1)')
-            await first_date.click()
-            await asyncio.sleep(2)
-            print("✓ Вернулся на первый график")
+            print("Кликаю на второй график (завтра)...")
+            second_date = None
+            screenshot_tomorrow_cropped = None
+            try:
+                date_selector = self.page.locator('div.date:nth-child(2)')
+                await date_selector.wait_for(state='visible', timeout=15000)
+                
+                second_date = await date_selector.text_content()
+                second_date = second_date.strip()
+                print(f"Дата второго графика: {second_date}")
+                
+                await date_selector.click()
+                print("✓ Кликнул на второй график, жду загрузки...")
+                await asyncio.sleep(5)
+                
+                await self._close_survey_if_present()
+                
+                print("Делаю скриншот второго графика...")
+                screenshot_tomorrow = await asyncio.wait_for(
+                    self.page.screenshot(full_page=True, type='png'),
+                    timeout=30
+                )
+                screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
+                print("✓ Скриншот второго графика готов")
+                
+                print("Возвращаюсь на первый график...")
+                first_date = self.page.locator('div.date:nth-child(1)')
+                
+                # Проверяем что элемент доступен перед кликом
+                await first_date.wait_for(state='visible', timeout=10000)
+                print("✓ Элемент первого графика найден и видим")
+                
+                await first_date.click()
+                print("✓ Кликнул на первый график")
+                
+                await asyncio.sleep(2)
+                
+                # Проверяем что переключились обратно
+                current_url = self.page.url
+                print(f"✓ Вернулся на первый график, URL: {current_url}")
+                
+            except asyncio.TimeoutError as te:
+                print(f"⚠ Таймаут при работе со вторым графиком: {te}")
+                print("Продолжаю без второго графика")
+            except Exception as e:
+                print(f"⚠ Не удалось получить второй график: {e}")
+                import traceback
+                traceback.print_exc()
+            
+            return {
+                'screenshot_main': screenshot_main_cropped,
+                'screenshot_tomorrow': screenshot_tomorrow_cropped,
+                'update_date': self.last_update_date,
+                'second_date': second_date,
+                'timestamp': datetime.now().isoformat()
+            }
             
         except Exception as e:
-            print(f"⚠ Не удалось получить второй график: {e}")
-        
-        return {
-            'screenshot_main': screenshot_main_cropped,
-            'screenshot_tomorrow': screenshot_tomorrow_cropped,
-            'update_date': self.last_update_date,
-            'second_date': second_date,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-    except Exception as e:
-        print(f"✘ Ошибка при создании скриншотов: {e}")
-        raise
+            print(f"✘ Ошибка при создании скриншотов: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
 
     
     async def close_browser(self):
@@ -936,7 +950,6 @@ async def check_schedule():
     """Периодическая проверка каждые 5 минут"""
     channel = None
     try:
-        # Пропускаем если браузер не инициализирован
         if not checker.browser or not checker.page:
             print("⏭️ Браузер не инициализирован, пропускаю проверку")
             return
@@ -957,11 +970,9 @@ async def check_schedule():
             print(f"{'='*50}\n")
             return
         
-        # ИЗМЕНЕНИЕ 5: Увеличен таймаут со 120 до 180 секунд (3 минуты)
         result = await asyncio.wait_for(checker.make_screenshots(), timeout=180)
         await save_check(result['update_date'])
         
-        # ВЕСЬ ОСТАЛЬНОЙ КОД ОСТАЕТСЯ БЕЗ ИЗМЕНЕНИЙ!
         embed = discord.Embed(
             title="⚡ Графік відключень ДТЕК Київські регіональні електромережі",
             description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
@@ -1010,7 +1021,6 @@ async def check_schedule():
         print(f"{'='*50}\n")
         
     except asyncio.TimeoutError:
-        # ИЗМЕНЕНИЕ 6: Добавлено специальное сообщение для таймаута
         print(f"⏱️ ТАЙМАУТ: Операция заняла больше 3 минут")
         print(f"{'='*50}\n")
         if channel:
@@ -1057,11 +1067,9 @@ async def manual_check(ctx):
     await ctx.send("⏳ Починаю перевірку графіка відключень...")
     
     try:
-        # ИЗМЕНЕНИЕ 7: Увеличен таймаут со 120 до 180 секунд
         result = await asyncio.wait_for(checker.make_screenshots(), timeout=180)
         await save_check(result['update_date'])
         
-        # ВЕСЬ ОСТАЛЬНОЙ КОД ОСТАЕТСЯ БЕЗ ИЗМЕНЕНИЙ!
         embed = discord.Embed(
             title="⚡ Графік відключень ДТЕК (Ручна перевірка)",
             description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
