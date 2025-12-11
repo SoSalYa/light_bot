@@ -1051,15 +1051,17 @@ async def before_check_schedule():
 async def manual_check(ctx):
     """Ручная проверка по команде !check"""
     if not checker.browser or not checker.page:
-        await ctx.send("❌ Браузер не інціалізовано. Відкрийте веб-інтерфейс та натисніть 'Інціалізувати браузер'")
+        await ctx.send("✘ Браузер не ініціалізовано. Відкрийте веб-інтерфейс та натисніть 'Ініціалізувати браузер'")
         return
     
     await ctx.send("⏳ Починаю перевірку графіка відключень...")
     
     try:
-        result = await asyncio.wait_for(checker.make_screenshots(), timeout=120)
+        # ИЗМЕНЕНИЕ 7: Увеличен таймаут со 120 до 180 секунд
+        result = await asyncio.wait_for(checker.make_screenshots(), timeout=180)
         await save_check(result['update_date'])
         
+        # ВЕСЬ ОСТАЛЬНОЙ КОД ОСТАЕТСЯ БЕЗ ИЗМЕНЕНИЙ!
         embed = discord.Embed(
             title="⚡ Графік відключень ДТЕК (Ручна перевірка)",
             description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
@@ -1102,13 +1104,13 @@ async def manual_check(ctx):
     except asyncio.TimeoutError:
         error_embed = discord.Embed(
             title="⏱️ Таймаут",
-            description="Перевірка зайняла більше 2 хвилин.",
+            description="Перевірка зайняла більше 3 хвилин.",
             color=discord.Color.orange()
         )
         await ctx.send(embed=error_embed)
     except Exception as e:
         error_embed = discord.Embed(
-            title="❌ Помилка",
+            title="✘ Помилка",
             description=f"```{str(e)[:500]}```",
             color=discord.Color.red()
         )
