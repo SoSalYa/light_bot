@@ -99,16 +99,27 @@ class DTEKChecker:
                       wait_until='domcontentloaded', timeout=30000)
         await asyncio.sleep(2)
         
-        # 2. Закрываем модальное окно (если есть)
+        # 2. Закрываем модальное окно с предупреждением (если есть)
         try:
-            print("Проверяю модальное окно...")
+            print("Проверяю модальное окно с предупреждением...")
             close_btn = self.page.locator('button.m-attention__close')
             await close_btn.wait_for(state='visible', timeout=5000)
             await close_btn.click()
-            print("Модальное окно закрыто")
+            print("Модальное окно с предупреждением закрыто")
             await asyncio.sleep(1)
         except Exception as e:
-            print(f"Модальное окно не найдено или уже закрыто")
+            print(f"Модальное окно с предупреждением не найдено")
+        
+        # 2.5. Закрываем окно с опросом (если появилось)
+        try:
+            print("Проверяю окно с опросом...")
+            survey_close = self.page.locator('#modal-questionnaire-welcome-7 .modal__close')
+            await survey_close.wait_for(state='visible', timeout=3000)
+            await survey_close.click()
+            print("Окно с опросом закрыто")
+            await asyncio.sleep(1)
+        except Exception as e:
+            print(f"Окно с опросом не найдено")
         
         # 3. Вводим ЧАСТИЧНОЕ название города (как в Automa: "книж")
         print("Ввожу город...")
