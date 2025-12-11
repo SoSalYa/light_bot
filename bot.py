@@ -9,6 +9,7 @@ import asyncpg
 from PIL import Image
 from aiohttp import web
 import random
+import json
 
 # Конфигурация
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
@@ -69,8 +70,44 @@ class DTEKChecker:
         self.browser = None
         self.context = None
         self.playwright = None
-        self.page = None  # Добавлено: храним страницу
-        self.last_update_date = None  # Добавлено: храним последнюю дату
+        self.page = None
+        self.last_update_date = None
+        self.cookies_file = 'dtek_cookies.json'
+    
+    def _get_random_user_agent(self):
+        """Возвращает случайный реальный User-Agent"""
+        user_agents = [
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
+            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15',
+        ]
+        return random.choice(user_agents)
+    
+    async def _save_cookies(self):
+        """Сохраняет куки в файл"""
+        try:
+            if self.context:
+                cookies = await self.context.cookies()
+                with open(self.cookies_file, 'w') as f:
+                    json.dump(cookies, f)
+                print("✓ Куки сохранены")
+        except Exception as e:
+            print(f"⚠ Не удалось сохранить куки: {e}")
+    
+    async def _load_cookies(self):
+        """Загружает куки из файла"""
+        try:
+            if os.path.exists(self.cookies_file):
+                with open(self.cookies_file, 'r') as f:
+                    cookies = json.load(f)
+                await self.context.add_cookies(cookies)
+                print("✓ Куки загружены")
+                return True
+        except Exception as e:
+            print(f"⚠ Не удалось загрузить куки: {e}")
+        return False
     
     async def _random_delay(self, min_ms=100, max_ms=500):
         """Случайная задержка для имитации человека"""
@@ -86,8 +123,18 @@ class DTEKChecker:
                 x = box['x'] + random.uniform(box['width'] * 0.3, box['width'] * 0.7)
                 y = box['y'] + random.uniform(box['height'] * 0.3, box['height'] * 0.7)
                 
-                # Двигаем мышку с небольшими отклонениями
-                await self.page.mouse.move(x + random.uniform(-5, 5), y + random.uniform(-5, 5))
+                # Двигаем мышку плавно с небольшими отклонениями
+                current_pos = await self.page.evaluate('() => [window.mouseX || 0, window.mouseY || 0]')
+                steps = random.randint(10, 20)
+                for i in range(steps):
+                    intermediate_x = current_pos[0] + (x - current_pos[0]) * (i / steps)
+                    intermediate_y = current_pos[1] + (y - current_pos[1]) * (i / steps)
+                    await self.page.mouse.move(
+                        intermediate_x + random.uniform(-2, 2), 
+                        intermediate_y + random.uniform(-2, 2)
+                    )
+                    await asyncio.sleep(random.uniform(0.001, 0.003))
+                
                 await self._random_delay(50, 150)
                 
             await locator.click()
@@ -96,65 +143,252 @@ class DTEKChecker:
             await locator.click()
     
     async def _human_type(self, locator, text):
-        """Ввод текста с человеческой скоростью"""
+        """Ввод текста с человеческой скоростью и ошибками"""
         await locator.click()
         await self._random_delay(100, 300)
         
         for char in text:
-            await locator.press_sequentially(char, delay=random.uniform(50, 150))
+            # Иногда делаем паузу (как будто задумались)
+            if random.random() < 0.1:
+                await self._random_delay(300, 800)
             
+            await locator.press_sequentially(char, delay=random.uniform(50, 200))
+    
+    async def _random_mouse_movements(self):
+        """Случайные движения мышкой для имитации живого пользователя"""
+        try:
+            for _ in range(random.randint(2, 5)):
+                x = random.randint(100, 1800)
+                y = random.randint(100, 1000)
+                await self.page.mouse.move(x, y)
+                await self._random_delay(100, 300)
+        except:
+            pass
+    
     async def init_browser(self):
         """Инициализация браузера и открытие страницы ОДИН РАЗ"""
         if not self.playwright:
             self.playwright = await async_playwright().start()
             
-            # Запускаем браузер с настройками для обхода детекции
-            self.browser = await self.playwright.chromium.launch(
-                headless=True,
-                args=[
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-dev-shm-usage',
-                    '--disable-web-security',
-                ]
-            )
+            # Пробуем использовать настоящий Chrome, если недоступен - Chromium
+            browser_args = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--disable-web-security',
+                '--disable-features=IsolateOrigins,site-per-process',
+                '--allow-running-insecure-content',
+                '--disable-notifications',
+                '--disable-popup-blocking',
+                '--start-maximized',
+                '--disable-infobars',
+                '--window-size=1920,1080',
+            ]
             
-            # Создаем контекст с реальными параметрами браузера
+            try:
+                # Пробуем запустить Chrome
+                self.browser = await self.playwright.chromium.launch(
+                    headless=True,
+                    args=browser_args,
+                    channel='chrome'  # Использует установленный Chrome
+                )
+                print("✓ Запущен настоящий Chrome")
+            except:
+                # Если Chrome недоступен, используем Chromium
+                self.browser = await self.playwright.chromium.launch(
+                    headless=True,
+                    args=browser_args
+                )
+                print("✓ Запущен Chromium")
+            
+            # Создаем контекст с МАКСИМАЛЬНОЙ маскировкой
+            user_agent = self._get_random_user_agent()
+            
             self.context = await self.browser.new_context(
                 viewport={'width': 1920, 'height': 1080},
                 locale='uk-UA',
                 timezone_id='Europe/Kiev',
-                user_agent='Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
+                user_agent=user_agent,
+                device_scale_factor=1,
+                has_touch=False,
+                is_mobile=False,
+                color_scheme='light',
+                permissions=['geolocation'],
+                geolocation={'latitude': 50.4501, 'longitude': 30.5234},  # Киев
                 extra_http_headers={
-                    'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7',
+                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
+                    'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7,ru;q=0.6',
+                    'Accept-Encoding': 'gzip, deflate, br',
+                    'DNT': '1',
+                    'Connection': 'keep-alive',
+                    'Upgrade-Insecure-Requests': '1',
+                    'Sec-Fetch-Dest': 'document',
+                    'Sec-Fetch-Mode': 'navigate',
+                    'Sec-Fetch-Site': 'none',
+                    'Sec-Fetch-User': '?1',
+                    'Cache-Control': 'max-age=0',
                 }
             )
             
-            # Скрываем признаки автоматизации
+            # МОЩНЫЙ анти-детект скрипт
             await self.context.add_init_script("""
+                // Удаляем webdriver
                 Object.defineProperty(navigator, 'webdriver', {
                     get: () => undefined
                 });
                 
+                // Подделываем Chrome API
                 window.navigator.chrome = {
-                    runtime: {}
+                    runtime: {},
+                    loadTimes: function() {},
+                    csi: function() {},
+                    app: {}
                 };
                 
+                // Подделываем permissions
+                const originalQuery = window.navigator.permissions.query;
+                window.navigator.permissions.query = (parameters) => (
+                    parameters.name === 'notifications' ?
+                        Promise.resolve({ state: Notification.permission }) :
+                        originalQuery(parameters)
+                );
+                
+                // Подделываем plugins
                 Object.defineProperty(navigator, 'plugins', {
-                    get: () => [1, 2, 3, 4, 5]
+                    get: () => [
+                        {
+                            0: {type: "application/x-google-chrome-pdf"},
+                            description: "Portable Document Format",
+                            filename: "internal-pdf-viewer",
+                            length: 1,
+                            name: "Chrome PDF Plugin"
+                        },
+                        {
+                            0: {type: "application/pdf"},
+                            description: "Portable Document Format",
+                            filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai",
+                            length: 1,
+                            name: "Chrome PDF Viewer"
+                        },
+                        {
+                            0: {type: "application/x-nacl"},
+                            description: "",
+                            filename: "internal-nacl-plugin",
+                            length: 2,
+                            name: "Native Client"
+                        }
+                    ]
                 });
                 
+                // Подделываем languages
                 Object.defineProperty(navigator, 'languages', {
-                    get: () => ['uk-UA', 'uk', 'en-US', 'en']
+                    get: () => ['uk-UA', 'uk', 'en-US', 'en', 'ru']
                 });
+                
+                // Подделываем WebGL
+                const getParameter = WebGLRenderingContext.prototype.getParameter;
+                WebGLRenderingContext.prototype.getParameter = function(parameter) {
+                    if (parameter === 37445) {
+                        return 'Intel Inc.';
+                    }
+                    if (parameter === 37446) {
+                        return 'Intel Iris OpenGL Engine';
+                    }
+                    return getParameter(parameter);
+                };
+                
+                // Подделываем Canvas fingerprint
+                const toBlob = HTMLCanvasElement.prototype.toBlob;
+                const toDataURL = HTMLCanvasElement.prototype.toDataURL;
+                const getImageData = CanvasRenderingContext2D.prototype.getImageData;
+                
+                var noisify = function(canvas, context) {
+                    const shift = {
+                        'r': Math.floor(Math.random() * 10) - 5,
+                        'g': Math.floor(Math.random() * 10) - 5,
+                        'b': Math.floor(Math.random() * 10) - 5,
+                        'a': Math.floor(Math.random() * 10) - 5
+                    };
+                    
+                    const width = canvas.width;
+                    const height = canvas.height;
+                    const imageData = getImageData.apply(context, [0, 0, width, height]);
+                    
+                    for (let i = 0; i < height; i++) {
+                        for (let j = 0; j < width; j++) {
+                            const n = ((i * (width * 4)) + (j * 4));
+                            imageData.data[n + 0] = imageData.data[n + 0] + shift.r;
+                            imageData.data[n + 1] = imageData.data[n + 1] + shift.g;
+                            imageData.data[n + 2] = imageData.data[n + 2] + shift.b;
+                            imageData.data[n + 3] = imageData.data[n + 3] + shift.a;
+                        }
+                    }
+                    
+                    context.putImageData(imageData, 0, 0);
+                };
+                
+                Object.defineProperty(HTMLCanvasElement.prototype, 'toBlob', {
+                    value: function() {
+                        noisify(this, this.getContext('2d'));
+                        return toBlob.apply(this, arguments);
+                    }
+                });
+                
+                Object.defineProperty(HTMLCanvasElement.prototype, 'toDataURL', {
+                    value: function() {
+                        noisify(this, this.getContext('2d'));
+                        return toDataURL.apply(this, arguments);
+                    }
+                });
+                
+                // Эмулируем батарею
+                Object.defineProperty(navigator, 'getBattery', {
+                    value: () => Promise.resolve({
+                        charging: true,
+                        chargingTime: 0,
+                        dischargingTime: Infinity,
+                        level: 1
+                    })
+                });
+                
+                // Подделываем hardwareConcurrency
+                Object.defineProperty(navigator, 'hardwareConcurrency', {
+                    get: () => 8
+                });
+                
+                // Подделываем deviceMemory
+                Object.defineProperty(navigator, 'deviceMemory', {
+                    get: () => 8
+                });
+                
+                // Отслеживаем позицию мыши
+                document.addEventListener('mousemove', (e) => {
+                    window.mouseX = e.clientX;
+                    window.mouseY = e.clientY;
+                });
+                
+                // Добавляем случайные property для fingerprint
+                window.cdc_adoQpoasnfa76pfcZLmcfl_Array = [];
+                window.cdc_adoQpoasnfa76pfcZLmcfl_Promise = Promise;
+                window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol = Symbol;
+                
+                console.log('🥷 Stealth mode activated');
             """)
             
-            print("✓ Браузер инициализирован с защитой от детекции")
+            print("✓ Браузер инициализирован с МАКСИМАЛЬНОЙ защитой от детекции")
             
-            # Создаем страницу и заполняем форму один раз
+            # Создаем страницу
             self.page = await self.context.new_page()
+            
+            # Загружаем куки если есть
+            await self._load_cookies()
+            
+            # Настраиваем страницу
             await self._setup_page()
+            
+            # Сохраняем куки после успешной настройки
+            await self._save_cookies()
     
     async def _setup_page(self):
         """Настройка страницы - выполняется ОДИН РАЗ при инициализации"""
@@ -165,34 +399,48 @@ class DTEKChecker:
         await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', 
                       wait_until='networkidle', timeout=60000)
         
+        # Случайные движения мышкой как живой пользователь
+        await self._random_mouse_movements()
+        
         # Ждем естественное время как человек
-        await self._random_delay(2000, 4000)
+        await self._random_delay(3000, 5000)
         
         # Проверяем наличие капчи hCaptcha
         try:
             print("Проверяю наличие капчи...")
             captcha_frame = self.page.frame_locator('iframe[src*="hcaptcha"]').first
-            if await captcha_frame.locator('body').count() > 0:
-                print("⚠️ Обнаружена капча! Жду её прохождения...")
-                # Ждем до 30 секунд, пока капча не исчезнет
-                for i in range(30):
+            captcha_checkbox = self.page.locator('iframe[src*="checkbox"]')
+            
+            if await captcha_checkbox.count() > 0:
+                print("⚠️ Обнаружена hCaptcha!")
+                print("💡 Совет: Капчу нужно пройти вручную или использовать решатель")
+                print("⏳ Жду прохождения капчи (до 60 секунд)...")
+                
+                # Ждем пока капча не исчезнет
+                for i in range(60):
                     await asyncio.sleep(1)
-                    if await captcha_frame.locator('body').count() == 0:
-                        print("✓ Капча пройдена или исчезла")
+                    if await captcha_checkbox.count() == 0:
+                        print("✓ Капча пройдена!")
+                        await self._save_cookies()  # Сохраняем куки после прохождения
                         break
-                    if i == 29:
-                        print("⚠️ Капча не исчезла за 30 секунд, пробую продолжить...")
+                    if i == 59:
+                        print("⚠️ Капча не пройдена за 60 секунд")
+                        raise Exception("Не удалось пройти капчу")
         except Exception as e:
-            print(f"Капча не обнаружена или уже пройдена")
+            if "Не удалось пройти капчу" in str(e):
+                raise
+            print(f"Капча не обнаружена или уже пройдена (куки помогли!)")
         
         # Небольшая пауза после проверки капчи
-        await self._random_delay(1000, 2000)
+        await self._random_delay(1500, 2500)
+        await self._random_mouse_movements()
         
         # 2. Закрываем модальное окно с предупреждением (если есть)
         try:
             print("Проверяю модальное окно с предупреждением...")
             close_btn = self.page.locator('button.m-attention__close')
             if await close_btn.count() > 0:
+                await self._random_delay(500, 1000)
                 await self._human_move_and_click(close_btn)
                 print("Модальное окно с предупреждением закрыто")
                 await self._random_delay(500, 1000)
@@ -204,11 +452,16 @@ class DTEKChecker:
             print("Проверяю окно с опросом...")
             survey_close = self.page.locator('#modal-questionnaire-welcome-7 .modal__close')
             if await survey_close.count() > 0:
+                await self._random_delay(500, 1000)
                 await self._human_move_and_click(survey_close)
                 print("Окно с опросом закрыто")
                 await self._random_delay(500, 1000)
         except Exception as e:
             print(f"Окно с опросом не найдено")
+        
+        # Случайные движения перед заполнением формы
+        await self._random_mouse_movements()
+        await self._random_delay(1000, 2000)
         
         # 3. Вводим ЧАСТИЧНОЕ название города: "княж"
         print("Ввожу город...")
@@ -217,63 +470,69 @@ class DTEKChecker:
         
         # Двигаем мышку к полю
         await self._human_move_and_click(city_input)
-        await self._random_delay(200, 400)
+        await self._random_delay(200, 500)
         await city_input.clear()
-        await self._random_delay(100, 300)
+        await self._random_delay(150, 350)
         await self._human_type(city_input, 'княж')
         
         await city_input.dispatch_event('change')
-        await self._random_delay(1500, 2500)
+        await self._random_delay(1800, 2500)
         
         # 4. Кликаем на ВТОРОЙ элемент из выпадающего списка
         print("Выбираю из списка: с. Книжичі (Броварський)...")
         city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
         await city_option.wait_for(state='visible', timeout=10000)
+        await self._random_delay(300, 600)
         await self._human_move_and_click(city_option)
         print("Город выбран")
-        await self._random_delay(800, 1500)
+        await self._random_delay(1000, 1800)
         
-        # 5. Вводим ЧАСТИЧНОЕ название улицы (как в Automa: "киї")
+        # 5. Вводим ЧАСТИЧНОЕ название улицы: "киї"
         print("Ввожу улицу...")
         street_input = self.page.locator('.discon-input-wrapper #street')
         await street_input.wait_for(state='visible', timeout=10000)
         await self._human_move_and_click(street_input)
-        await self._random_delay(200, 400)
+        await self._random_delay(200, 500)
         await street_input.clear()
-        await self._random_delay(100, 300)
+        await self._random_delay(150, 350)
         await self._human_type(street_input, 'киї')
         
         await street_input.dispatch_event('change')
-        await self._random_delay(1500, 2500)
+        await self._random_delay(1800, 2500)
         
         # 6. Кликаем на ВТОРОЙ элемент из выпадающего списка
         print("Выбираю из списка: вул. Київська...")
         street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
         await street_option.wait_for(state='visible', timeout=10000)
+        await self._random_delay(300, 600)
         await self._human_move_and_click(street_option)
         print("Улица выбрана")
-        await self._random_delay(800, 1500)
+        await self._random_delay(1000, 1800)
         
-        # 7. Вводим номер дома полностью (как в Automa: "168")
+        # 7. Вводим номер дома: "168"
         print("Ввожу номер дома...")
         house_input = self.page.locator('input#house_num')
         await house_input.wait_for(state='visible', timeout=10000)
         await self._human_move_and_click(house_input)
-        await self._random_delay(200, 400)
+        await self._random_delay(200, 500)
         await house_input.clear()
-        await self._random_delay(100, 300)
+        await self._random_delay(150, 350)
         await self._human_type(house_input, '168')
         
         await house_input.dispatch_event('change')
-        await self._random_delay(1500, 2500)
+        await self._random_delay(1800, 2500)
         
         # 8. Кликаем на ПЕРВЫЙ элемент из выпадающего списка
         print("Выбираю из списка: 168...")
         house_option = self.page.locator('#house_numautocomplete-list > div:first-child')
         await house_option.wait_for(state='visible', timeout=10000)
+        await self._random_delay(300, 600)
         await self._human_move_and_click(house_option)
         print("Номер дома выбран")
-        await self._random_delay(2000, 3000)
+        await self._random_delay(2500, 3500)
+        
+        # Случайные движения после заполнения
+        await self._random_mouse_movements()
         
         # 9. Получаем начальную дату обновления
         print("Получаю дату обновления...")
@@ -306,6 +565,10 @@ class DTEKChecker:
             # Закрываем опрос если появился
             await self._close_survey_if_present()
             
+            # Случайные движения перед проверкой
+            if random.random() < 0.3:  # 30% шанс
+                await self._random_mouse_movements()
+            
             # Читаем текущую дату
             update_elem = self.page.locator('span.update')
             await update_elem.wait_for(state='visible', timeout=10000)
@@ -318,6 +581,8 @@ class DTEKChecker:
             if current_date != self.last_update_date:
                 print("🔔 ОБНОВЛЕНИЕ ОБНАРУЖЕНО!")
                 self.last_update_date = current_date
+                # Сохраняем куки после обнаружения обновления
+                await self._save_cookies()
                 return True
             return False
         except Exception as e:
@@ -454,10 +719,18 @@ async def on_ready():
     print(f'✓ {bot.user} подключен к Discord!')
     print(f'✓ Мониторинг канала: {CHANNEL_ID}')
     print(f'✓ Интервал проверки: каждые 5 минут')
+    print(f'✓ Режим: постоянный браузер (без перезагрузок)')
+    print(f'🥷 STEALTH MODE: Максимальная защита от детекции')
     await init_db_pool()
     await start_web_server()
     # Инициализируем браузер один раз
-    await checker.init_browser()
+    try:
+        await checker.init_browser()
+        print("🎉 Бот полностью готов к работе!")
+    except Exception as e:
+        print(f"❌ Ошибка инициализации: {e}")
+        print("💡 Если это капча - пройдите её вручную или настройте решатель")
+        return
     check_schedule.start()
 
 @tasks.loop(minutes=5)
@@ -663,6 +936,14 @@ async def bot_info(ctx):
         inline=True
     )
     
+    # Статус куков
+    cookies_status = "✅ Збережено" if os.path.exists(checker.cookies_file) else "❌ Відсутні"
+    embed.add_field(
+        name="🍪 Куки",
+        value=cookies_status,
+        inline=True
+    )
+    
     if checker.last_update_date:
         embed.add_field(
             name="🕐 Остання дата на сайті",
@@ -671,8 +952,14 @@ async def bot_info(ctx):
         )
     
     embed.add_field(
+        name="🥷 Захист",
+        value="• Маскування під справжній Chrome\n• Canvas/WebGL fingerprint\n• Імітація руху миші\n• Збереження куків",
+        inline=False
+    )
+    
+    embed.add_field(
         name="📝 Доступні команди",
-        value="`!check` - Ручна перевірка\n`!info` - Інформація про бота\n`!status` - Детальний статус\n`!stop` - Зупинити бота (тільки адміни)",
+        value="`!check` - Ручна перевірка\n`!info` - Інформація про бота\n`!status` - Детальний статус\n`!clearcookies` - Очистити куки\n`!stop` - Зупинити бота (тільки адміни)",
         inline=False
     )
     
@@ -710,12 +997,29 @@ async def bot_status(ctx):
     
     await ctx.send(embed=embed)
 
+@bot.command(name='clearcookies')
+async def clear_cookies(ctx):
+    """Очистка куков"""
+    try:
+        if os.path.exists(checker.cookies_file):
+            os.remove(checker.cookies_file)
+            await ctx.send("✅ Куки видалено! При наступному запуску доведеться пройти капчу знову.")
+        else:
+            await ctx.send("ℹ️ Куки відсутні")
+    except Exception as e:
+        await ctx.send(f"❌ Помилка: {str(e)[:200]}")
+
 @bot.command(name='stop')
 @commands.has_permissions(administrator=True)
 async def stop_bot(ctx):
     """Остановка бота (только для администраторов)"""
     await ctx.send("🛑 Зупиняю бота...")
     check_schedule.cancel()
+    # Сохраняем куки перед выходом
+    try:
+        await checker._save_cookies()
+    except:
+        pass
     try:
         await checker.close_browser()
     except:
@@ -725,12 +1029,18 @@ async def stop_bot(ctx):
 
 if __name__ == '__main__':
     try:
-        print("🤖 Запуск Discord бота DTEK...")
+        print("🤖 Запуск Discord бота DTEK (режим постоянного браузера + STEALTH)...")
         print(f"📅 Дата: {datetime.now()}")
+        print("🥷 Максимальная защита от детекции активирована!")
         bot.run(DISCORD_TOKEN)
     except KeyboardInterrupt:
         print("\n🛑 Остановка бота...")
     finally:
+        try:
+            # Сохраняем куки перед выходом
+            asyncio.run(checker._save_cookies())
+        except:
+            pass
         try:
             asyncio.run(checker.close_browser())
         except:
