@@ -8,8 +8,10 @@ import io
 import asyncpg
 from PIL import Image
 from aiohttp import web
+import aiohttp
 import random
 import json
+import base64
 
 # Конфигурация
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
@@ -19,6 +21,9 @@ PORT = int(os.getenv('PORT', 10000))
 
 # Database pool
 db_pool = None
+
+# WebSocket connections для live view
+websocket_connections = set()
 
 # Создание бота
 intents = discord.Intents.default()
@@ -44,26 +49,532 @@ async def close_db_pool():
         await db_pool.close()
         print("✓ Database pool закрыт")
 
-# HTTP сервер для Render health checks
+# HTTP сервер для Render health checks + VNC interface
 async def handle_health(request):
     """Health check endpoint"""
     return web.Response(text="OK", status=200)
 
 async def handle_root(request):
-    """Root endpoint"""
-    return web.Response(text="DTEK Bot is running!", status=200)
+    """Root endpoint - VNC interface"""
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>DTEK Bot Remote Control</title>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                padding: 20px;
+            }
+            .container {
+                max-width: 1400px;
+                margin: 0 auto;
+            }
+            .header {
+                text-align: center;
+                color: white;
+                margin-bottom: 30px;
+            }
+            .header h1 {
+                font-size: 2.5em;
+                margin-bottom: 10px;
+                text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            }
+            .status {
+                display: inline-block;
+                padding: 8px 20px;
+                background: rgba(255,255,255,0.2);
+                border-radius: 20px;
+                font-size: 14px;
+                backdrop-filter: blur(10px);
+            }
+            .status.online { background: rgba(76, 175, 80, 0.3); }
+            .status.offline { background: rgba(244, 67, 54, 0.3); }
+            
+            .control-panel {
+                background: white;
+                border-radius: 15px;
+                padding: 20px;
+                margin-bottom: 20px;
+                box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            }
+            .control-panel h2 {
+                margin-bottom: 15px;
+                color: #333;
+            }
+            .buttons {
+                display: flex;
+                gap: 10px;
+                flex-wrap: wrap;
+            }
+            button {
+                padding: 12px 24px;
+                border: none;
+                border-radius: 8px;
+                cursor: pointer;
+                font-size: 14px;
+                font-weight: 600;
+                transition: all 0.3s;
+                box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            }
+            button:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 6px 12px rgba(0,0,0,0.15);
+            }
+            button:active {
+                transform: translateY(0);
+            }
+            .btn-primary {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+            }
+            .btn-success {
+                background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);
+                color: white;
+            }
+            .btn-danger {
+                background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+                color: white;
+            }
+            .btn-info {
+                background: linear-gradient(135deg, #3a7bd5 0%, #00d2ff 100%);
+                color: white;
+            }
+            
+            .viewer {
+                background: white;
+                border-radius: 15px;
+                padding: 20px;
+                box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+                position: relative;
+            }
+            .viewer h2 {
+                margin-bottom: 15px;
+                color: #333;
+            }
+            .screenshot-container {
+                position: relative;
+                width: 100%;
+                background: #f0f0f0;
+                border-radius: 10px;
+                overflow: hidden;
+                min-height: 600px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            #screenshot {
+                width: 100%;
+                height: auto;
+                display: block;
+                cursor: crosshair;
+            }
+            .loading {
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                text-align: center;
+                color: #999;
+            }
+            .spinner {
+                border: 4px solid #f3f3f3;
+                border-top: 4px solid #667eea;
+                border-radius: 50%;
+                width: 50px;
+                height: 50px;
+                animation: spin 1s linear infinite;
+                margin: 0 auto 10px;
+            }
+            @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+            
+            .coordinates {
+                position: absolute;
+                bottom: 10px;
+                left: 10px;
+                background: rgba(0,0,0,0.7);
+                color: white;
+                padding: 8px 12px;
+                border-radius: 5px;
+                font-family: monospace;
+                font-size: 12px;
+            }
+            
+            .info-panel {
+                background: white;
+                border-radius: 15px;
+                padding: 20px;
+                margin-top: 20px;
+                box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            }
+            .info-grid {
+                display: grid;
+                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
+                gap: 15px;
+            }
+            .info-card {
+                background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+                padding: 15px;
+                border-radius: 10px;
+            }
+            .info-card h3 {
+                font-size: 14px;
+                color: #666;
+                margin-bottom: 5px;
+            }
+            .info-card p {
+                font-size: 18px;
+                font-weight: bold;
+                color: #333;
+            }
+            
+            .instructions {
+                background: rgba(255, 255, 255, 0.95);
+                padding: 20px;
+                border-radius: 10px;
+                margin-bottom: 20px;
+                border-left: 4px solid #667eea;
+            }
+            .instructions h3 {
+                color: #667eea;
+                margin-bottom: 10px;
+            }
+            .instructions ul {
+                margin-left: 20px;
+                line-height: 1.8;
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🤖 DTEK Bot Remote Control</h1>
+                <span class="status" id="status">⚪ Connecting...</span>
+            </div>
+            
+            <div class="instructions">
+                <h3>📖 Как использовать:</h3>
+                <ul>
+                    <li><strong>Кликайте по скриншоту</strong> - клики передаются в браузер бота</li>
+                    <li><strong>Обновить скриншот</strong> - получить актуальное изображение</li>
+                    <li><strong>Пройти капчу</strong> - кликайте по элементам капчи прямо на скриншоте</li>
+                    <li>Скриншоты обновляются автоматически каждые 3 секунды</li>
+                </ul>
+            </div>
+            
+            <div class="control-panel">
+                <h2>🎮 Панель управления</h2>
+                <div class="buttons">
+                    <button class="btn-primary" onclick="refreshScreenshot()">🔄 Обновить скриншот</button>
+                    <button class="btn-success" onclick="initBrowser()">🚀 Инициализировать браузер</button>
+                    <button class="btn-info" onclick="manualCheck()">✅ Сделать проверку</button>
+                    <button class="btn-danger" onclick="clearCookies()">🍪 Очистить куки</button>
+                </div>
+            </div>
+            
+            <div class="viewer">
+                <h2>👁️ Удаленный просмотр браузера</h2>
+                <div class="screenshot-container">
+                    <div class="loading" id="loading">
+                        <div class="spinner"></div>
+                        <p>Загрузка...</p>
+                    </div>
+                    <img id="screenshot" style="display: none;" onclick="handleClick(event)">
+                    <div class="coordinates" id="coords">X: 0, Y: 0</div>
+                </div>
+            </div>
+            
+            <div class="info-panel">
+                <h2>📊 Статус бота</h2>
+                <div class="info-grid">
+                    <div class="info-card">
+                        <h3>Браузер</h3>
+                        <p id="browser-status">-</p>
+                    </div>
+                    <div class="info-card">
+                        <h3>Последняя дата</h3>
+                        <p id="last-update">-</p>
+                    </div>
+                    <div class="info-card">
+                        <h3>Куки</h3>
+                        <p id="cookies-status">-</p>
+                    </div>
+                    <div class="info-card">
+                        <h3>Последнее обновление</h3>
+                        <p id="last-refresh">-</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <script>
+            let autoRefresh = null;
+            let imageNaturalWidth = 0;
+            let imageNaturalHeight = 0;
+            
+            async function request(endpoint, method = 'GET', body = null) {
+                const options = { method };
+                if (body) {
+                    options.headers = { 'Content-Type': 'application/json' };
+                    options.body = JSON.stringify(body);
+                }
+                const response = await fetch(endpoint, options);
+                return await response.json();
+            }
+            
+            async function refreshScreenshot() {
+                try {
+                    const data = await request('/api/screenshot');
+                    if (data.screenshot) {
+                        const img = document.getElementById('screenshot');
+                        img.src = 'data:image/png;base64,' + data.screenshot;
+                        img.style.display = 'block';
+                        document.getElementById('loading').style.display = 'none';
+                        
+                        // Сохраняем реальные размеры
+                        img.onload = function() {
+                            imageNaturalWidth = img.naturalWidth;
+                            imageNaturalHeight = img.naturalHeight;
+                        };
+                        
+                        document.getElementById('last-refresh').textContent = new Date().toLocaleTimeString();
+                    }
+                } catch (e) {
+                    console.error('Error refreshing screenshot:', e);
+                }
+            }
+            
+            async function initBrowser() {
+                document.getElementById('status').textContent = '⏳ Инициализация...';
+                try {
+                    const data = await request('/api/init');
+                    alert(data.message);
+                    await updateStatus();
+                    await refreshScreenshot();
+                } catch (e) {
+                    alert('Ошибка: ' + e.message);
+                }
+            }
+            
+            async function manualCheck() {
+                document.getElementById('status').textContent = '⏳ Проверка...';
+                try {
+                    const data = await request('/api/check');
+                    alert(data.message);
+                    await refreshScreenshot();
+                } catch (e) {
+                    alert('Ошибка: ' + e.message);
+                }
+            }
+            
+            async function clearCookies() {
+                try {
+                    const data = await request('/api/clear-cookies', 'POST');
+                    alert(data.message);
+                    await updateStatus();
+                } catch (e) {
+                    alert('Ошибка: ' + e.message);
+                }
+            }
+            
+            async function handleClick(event) {
+                const img = event.target;
+                const rect = img.getBoundingClientRect();
+                
+                // Вычисляем клик относительно реального размера изображения
+                const scaleX = imageNaturalWidth / rect.width;
+                const scaleY = imageNaturalHeight / rect.height;
+                
+                const x = Math.round((event.clientX - rect.left) * scaleX);
+                const y = Math.round((event.clientY - rect.top) * scaleY);
+                
+                console.log(`Click: ${x}, ${y} (scale: ${scaleX.toFixed(2)}x${scaleY.toFixed(2)})`);
+                
+                try {
+                    const data = await request('/api/click', 'POST', { x, y });
+                    console.log(data.message);
+                    
+                    // Обновляем скриншот через секунду после клика
+                    setTimeout(refreshScreenshot, 1000);
+                } catch (e) {
+                    console.error('Click error:', e);
+                }
+            }
+            
+            // Отслеживание координат мыши
+            document.getElementById('screenshot').addEventListener('mousemove', (e) => {
+                const img = e.target;
+                const rect = img.getBoundingClientRect();
+                const scaleX = imageNaturalWidth / rect.width;
+                const scaleY = imageNaturalHeight / rect.height;
+                const x = Math.round((e.clientX - rect.left) * scaleX);
+                const y = Math.round((e.clientY - rect.top) * scaleY);
+                document.getElementById('coords').textContent = `X: ${x}, Y: ${y}`;
+            });
+            
+            async function updateStatus() {
+                try {
+                    const data = await request('/api/status');
+                    
+                    document.getElementById('browser-status').textContent = data.browser;
+                    document.getElementById('last-update').textContent = data.last_update || '-';
+                    document.getElementById('cookies-status').textContent = data.cookies;
+                    
+                    const statusElem = document.getElementById('status');
+                    if (data.browser === '✅ Открыт') {
+                        statusElem.className = 'status online';
+                        statusElem.textContent = '🟢 Online';
+                    } else {
+                        statusElem.className = 'status offline';
+                        statusElem.textContent = '🔴 Offline';
+                    }
+                } catch (e) {
+                    console.error('Status update error:', e);
+                }
+            }
+            
+            // Автообновление
+            function startAutoRefresh() {
+                autoRefresh = setInterval(() => {
+                    refreshScreenshot();
+                    updateStatus();
+                }, 3000);
+            }
+            
+            // Инициализация
+            window.onload = async () => {
+                await updateStatus();
+                await refreshScreenshot();
+                startAutoRefresh();
+            };
+        </script>
+    </body>
+    </html>
+    """
+    return web.Response(text=html, content_type='text/html')
+
+async def handle_screenshot(request):
+    """API: Получить скриншот браузера"""
+    try:
+        if not checker.page:
+            return web.json_response({'error': 'Browser not initialized'}, status=400)
+        
+        screenshot = await checker.page.screenshot(type='png', full_page=True)
+        screenshot_base64 = base64.b64encode(screenshot).decode('utf-8')
+        
+        return web.json_response({
+            'screenshot': screenshot_base64,
+            'timestamp': datetime.now().isoformat()
+        })
+    except Exception as e:
+        return web.json_response({'error': str(e)}, status=500)
+
+async def handle_click(request):
+    """API: Передать клик в браузер"""
+    try:
+        if not checker.page:
+            return web.json_response({'error': 'Browser not initialized'}, status=400)
+        
+        data = await request.json()
+        x = data.get('x', 0)
+        y = data.get('y', 0)
+        
+        # Кликаем в браузере
+        await checker.page.mouse.click(x, y)
+        print(f"Remote click: ({x}, {y})")
+        
+        return web.json_response({
+            'message': f'Clicked at ({x}, {y})',
+            'success': True
+        })
+    except Exception as e:
+        return web.json_response({'error': str(e)}, status=500)
+
+async def handle_init(request):
+    """API: Инициализировать браузер"""
+    try:
+        await checker.init_browser()
+        return web.json_response({
+            'message': 'Браузер инициализирован успешно!',
+            'success': True
+        })
+    except Exception as e:
+        return web.json_response({
+            'message': f'Ошибка инициализации: {str(e)}',
+            'success': False
+        }, status=500)
+
+async def handle_check(request):
+    """API: Выполнить проверку"""
+    try:
+        result = await checker.make_screenshots()
+        return web.json_response({
+            'message': 'Проверка выполнена успешно!',
+            'success': True,
+            'update_date': result.get('update_date')
+        })
+    except Exception as e:
+        return web.json_response({
+            'message': f'Ошибка проверки: {str(e)}',
+            'success': False
+        }, status=500)
+
+async def handle_clear_cookies(request):
+    """API: Очистить куки"""
+    try:
+        if os.path.exists(checker.cookies_file):
+            os.remove(checker.cookies_file)
+        return web.json_response({
+            'message': 'Куки успешно удалены',
+            'success': True
+        })
+    except Exception as e:
+        return web.json_response({
+            'message': f'Ошибка: {str(e)}',
+            'success': False
+        }, status=500)
+
+async def handle_status(request):
+    """API: Получить статус бота"""
+    browser_status = "✅ Открыт" if checker.browser else "❌ Закрыт"
+    cookies_status = "✅ Есть" if os.path.exists(checker.cookies_file) else "❌ Нет"
+    
+    return web.json_response({
+        'browser': browser_status,
+        'last_update': checker.last_update_date,
+        'cookies': cookies_status
+    })
 
 async def start_web_server():
-    """Запуск веб-сервера для Render"""
+    """Запуск веб-сервера с VNC интерфейсом"""
     app = web.Application()
+    
+    # Основные endpoints
     app.router.add_get('/', handle_root)
     app.router.add_get('/health', handle_health)
+    
+    # API endpoints
+    app.router.add_get('/api/screenshot', handle_screenshot)
+    app.router.add_post('/api/click', handle_click)
+    app.router.add_get('/api/init', handle_init)
+    app.router.add_get('/api/check', handle_check)
+    app.router.add_post('/api/clear-cookies', handle_clear_cookies)
+    app.router.add_get('/api/status', handle_status)
     
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    print(f"✓ Web server запущен на порту {PORT}")
+    print(f"✓ Web server with VNC interface started on port {PORT}")
+    print(f"🌐 Open in browser: http://localhost:{PORT}")
 
 class DTEKChecker:
     def __init__(self):
@@ -116,14 +627,11 @@ class DTEKChecker:
     async def _human_move_and_click(self, locator):
         """Клик с имитацией движения мышкой как у человека"""
         try:
-            # Получаем позицию элемента
             box = await locator.bounding_box()
             if box:
-                # Случайная точка внутри элемента
                 x = box['x'] + random.uniform(box['width'] * 0.3, box['width'] * 0.7)
                 y = box['y'] + random.uniform(box['height'] * 0.3, box['height'] * 0.7)
                 
-                # Двигаем мышку плавно с небольшими отклонениями
                 current_pos = await self.page.evaluate('() => [window.mouseX || 0, window.mouseY || 0]')
                 steps = random.randint(10, 20)
                 for i in range(steps):
@@ -139,23 +647,19 @@ class DTEKChecker:
                 
             await locator.click()
         except:
-            # Если не получилось с движением, просто кликаем
             await locator.click()
-    
-    async def _human_type(self, locator, text):
-        """Ввод текста с человеческой скоростью и ошибками"""
+async def _human_type(self, locator, text):
+        """Ввод текста с человеческой скоростью"""
         await locator.click()
         await self._random_delay(100, 300)
         
         for char in text:
-            # Иногда делаем паузу (как будто задумались)
             if random.random() < 0.1:
                 await self._random_delay(300, 800)
-            
             await locator.press_sequentially(char, delay=random.uniform(50, 200))
     
     async def _random_mouse_movements(self):
-        """Случайные движения мышкой для имитации живого пользователя"""
+        """Случайные движения мышкой"""
         try:
             for _ in range(random.randint(2, 5)):
                 x = random.randint(100, 1800)
@@ -166,11 +670,10 @@ class DTEKChecker:
             pass
     
     async def init_browser(self):
-        """Инициализация браузера и открытие страницы ОДИН РАЗ"""
+        """Инициализация браузера и открытие страницы"""
         if not self.playwright:
             self.playwright = await async_playwright().start()
             
-            # Пробуем использовать настоящий Chrome, если недоступен - Chromium
             browser_args = [
                 '--no-sandbox',
                 '--disable-setuid-sandbox',
@@ -187,22 +690,19 @@ class DTEKChecker:
             ]
             
             try:
-                # Пробуем запустить Chrome
                 self.browser = await self.playwright.chromium.launch(
                     headless=True,
                     args=browser_args,
-                    channel='chrome'  # Использует установленный Chrome
+                    channel='chrome'
                 )
                 print("✓ Запущен настоящий Chrome")
             except:
-                # Если Chrome недоступен, используем Chromium
                 self.browser = await self.playwright.chromium.launch(
                     headless=True,
                     args=browser_args
                 )
                 print("✓ Запущен Chromium")
             
-            # Создаем контекст с МАКСИМАЛЬНОЙ маскировкой
             user_agent = self._get_random_user_agent()
             
             self.context = await self.browser.new_context(
@@ -215,7 +715,7 @@ class DTEKChecker:
                 is_mobile=False,
                 color_scheme='light',
                 permissions=['geolocation'],
-                geolocation={'latitude': 50.4501, 'longitude': 30.5234},  # Киев
+                geolocation={'latitude': 50.4501, 'longitude': 30.5234},
                 extra_http_headers={
                     'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
                     'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7,ru;q=0.6',
@@ -231,223 +731,79 @@ class DTEKChecker:
                 }
             )
             
-            # МОЩНЫЙ анти-детект скрипт
             await self.context.add_init_script("""
-                // Удаляем webdriver
-                Object.defineProperty(navigator, 'webdriver', {
-                    get: () => undefined
-                });
-                
-                // Подделываем Chrome API
-                window.navigator.chrome = {
-                    runtime: {},
-                    loadTimes: function() {},
-                    csi: function() {},
-                    app: {}
-                };
-                
-                // Подделываем permissions
-                const originalQuery = window.navigator.permissions.query;
-                window.navigator.permissions.query = (parameters) => (
-                    parameters.name === 'notifications' ?
-                        Promise.resolve({ state: Notification.permission }) :
-                        originalQuery(parameters)
-                );
-                
-                // Подделываем plugins
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                window.navigator.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
                 Object.defineProperty(navigator, 'plugins', {
                     get: () => [
-                        {
-                            0: {type: "application/x-google-chrome-pdf"},
-                            description: "Portable Document Format",
-                            filename: "internal-pdf-viewer",
-                            length: 1,
-                            name: "Chrome PDF Plugin"
-                        },
-                        {
-                            0: {type: "application/pdf"},
-                            description: "Portable Document Format",
-                            filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai",
-                            length: 1,
-                            name: "Chrome PDF Viewer"
-                        },
-                        {
-                            0: {type: "application/x-nacl"},
-                            description: "",
-                            filename: "internal-nacl-plugin",
-                            length: 2,
-                            name: "Native Client"
-                        }
+                        {0: {type: "application/x-google-chrome-pdf"}, description: "Portable Document Format", filename: "internal-pdf-viewer", length: 1, name: "Chrome PDF Plugin"},
+                        {0: {type: "application/pdf"}, description: "Portable Document Format", filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai", length: 1, name: "Chrome PDF Viewer"}
                     ]
                 });
-                
-                // Подделываем languages
-                Object.defineProperty(navigator, 'languages', {
-                    get: () => ['uk-UA', 'uk', 'en-US', 'en', 'ru']
-                });
-                
-                // Подделываем WebGL
-                const getParameter = WebGLRenderingContext.prototype.getParameter;
-                WebGLRenderingContext.prototype.getParameter = function(parameter) {
-                    if (parameter === 37445) {
-                        return 'Intel Inc.';
-                    }
-                    if (parameter === 37446) {
-                        return 'Intel Iris OpenGL Engine';
-                    }
-                    return getParameter(parameter);
-                };
-                
-                // Подделываем Canvas fingerprint
-                const toBlob = HTMLCanvasElement.prototype.toBlob;
-                const toDataURL = HTMLCanvasElement.prototype.toDataURL;
-                const getImageData = CanvasRenderingContext2D.prototype.getImageData;
-                
-                var noisify = function(canvas, context) {
-                    const shift = {
-                        'r': Math.floor(Math.random() * 10) - 5,
-                        'g': Math.floor(Math.random() * 10) - 5,
-                        'b': Math.floor(Math.random() * 10) - 5,
-                        'a': Math.floor(Math.random() * 10) - 5
-                    };
-                    
-                    const width = canvas.width;
-                    const height = canvas.height;
-                    const imageData = getImageData.apply(context, [0, 0, width, height]);
-                    
-                    for (let i = 0; i < height; i++) {
-                        for (let j = 0; j < width; j++) {
-                            const n = ((i * (width * 4)) + (j * 4));
-                            imageData.data[n + 0] = imageData.data[n + 0] + shift.r;
-                            imageData.data[n + 1] = imageData.data[n + 1] + shift.g;
-                            imageData.data[n + 2] = imageData.data[n + 2] + shift.b;
-                            imageData.data[n + 3] = imageData.data[n + 3] + shift.a;
-                        }
-                    }
-                    
-                    context.putImageData(imageData, 0, 0);
-                };
-                
-                Object.defineProperty(HTMLCanvasElement.prototype, 'toBlob', {
-                    value: function() {
-                        noisify(this, this.getContext('2d'));
-                        return toBlob.apply(this, arguments);
-                    }
-                });
-                
-                Object.defineProperty(HTMLCanvasElement.prototype, 'toDataURL', {
-                    value: function() {
-                        noisify(this, this.getContext('2d'));
-                        return toDataURL.apply(this, arguments);
-                    }
-                });
-                
-                // Эмулируем батарею
-                Object.defineProperty(navigator, 'getBattery', {
-                    value: () => Promise.resolve({
-                        charging: true,
-                        chargingTime: 0,
-                        dischargingTime: Infinity,
-                        level: 1
-                    })
-                });
-                
-                // Подделываем hardwareConcurrency
-                Object.defineProperty(navigator, 'hardwareConcurrency', {
-                    get: () => 8
-                });
-                
-                // Подделываем deviceMemory
-                Object.defineProperty(navigator, 'deviceMemory', {
-                    get: () => 8
-                });
-                
-                // Отслеживаем позицию мыши
-                document.addEventListener('mousemove', (e) => {
-                    window.mouseX = e.clientX;
-                    window.mouseY = e.clientY;
-                });
-                
-                // Добавляем случайные property для fingerprint
-                window.cdc_adoQpoasnfa76pfcZLmcfl_Array = [];
-                window.cdc_adoQpoasnfa76pfcZLmcfl_Promise = Promise;
-                window.cdc_adoQpoasnfa76pfcZLmcfl_Symbol = Symbol;
-                
+                Object.defineProperty(navigator, 'languages', { get: () => ['uk-UA', 'uk', 'en-US', 'en', 'ru'] });
+                document.addEventListener('mousemove', (e) => { window.mouseX = e.clientX; window.mouseY = e.clientY; });
                 console.log('🥷 Stealth mode activated');
             """)
             
-            print("✓ Браузер инициализирован с МАКСИМАЛЬНОЙ защитой от детекции")
+            print("✓ Браузер инициализирован с защитой от детекции")
             
-            # Создаем страницу
             self.page = await self.context.new_page()
-            
-            # Загружаем куки если есть
             await self._load_cookies()
-            
-            # Настраиваем страницу
             await self._setup_page()
-            
-            # Сохраняем куки после успешной настройки
             await self._save_cookies()
     
     async def _setup_page(self):
-        """Настройка страницы - выполняется ОДИН РАЗ при инициализации"""
+        """Настройка страницы"""
         print(f"[{datetime.now()}] Начинаю настройку страницы...")
         
-        # 1. Открываем страницу
         print("Открываю страницу DTEK...")
         await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', 
                       wait_until='networkidle', timeout=60000)
         
-        # Случайные движения мышкой как живой пользователь
         await self._random_mouse_movements()
-        
-        # Ждем естественное время как человек
         await self._random_delay(3000, 5000)
         
-        # Проверяем наличие капчи hCaptcha
+        # Проверяем капчу
         try:
             print("Проверяю наличие капчи...")
-            captcha_frame = self.page.frame_locator('iframe[src*="hcaptcha"]').first
             captcha_checkbox = self.page.locator('iframe[src*="checkbox"]')
             
             if await captcha_checkbox.count() > 0:
                 print("⚠️ Обнаружена hCaptcha!")
-                print("💡 Совет: Капчу нужно пройти вручную или использовать решатель")
-                print("⏳ Жду прохождения капчи (до 60 секунд)...")
+                print("💡 Используйте веб-интерфейс для прохождения капчи")
+                print(f"🌐 Откройте: http://localhost:{PORT}")
+                print("⏳ Жду прохождения капчи...")
                 
                 # Ждем пока капча не исчезнет
-                for i in range(60):
+                for i in range(300):  # 5 минут
                     await asyncio.sleep(1)
                     if await captcha_checkbox.count() == 0:
                         print("✓ Капча пройдена!")
-                        await self._save_cookies()  # Сохраняем куки после прохождения
+                        await self._save_cookies()
                         break
-                    if i == 59:
-                        print("⚠️ Капча не пройдена за 60 секунд")
+                    if i == 299:
+                        print("⚠️ Капча не пройдена за 5 минут")
                         raise Exception("Не удалось пройти капчу")
         except Exception as e:
             if "Не удалось пройти капчу" in str(e):
                 raise
-            print(f"Капча не обнаружена или уже пройдена (куки помогли!)")
+            print(f"Капча не обнаружена или уже пройдена")
         
-        # Небольшая пауза после проверки капчи
         await self._random_delay(1500, 2500)
         await self._random_mouse_movements()
         
-        # 2. Закрываем модальное окно с предупреждением (если есть)
+        # Закрываем модальные окна
         try:
-            print("Проверяю модальное окно с предупреждением...")
+            print("Проверяю модальное окно...")
             close_btn = self.page.locator('button.m-attention__close')
             if await close_btn.count() > 0:
                 await self._random_delay(500, 1000)
                 await self._human_move_and_click(close_btn)
-                print("Модальное окно с предупреждением закрыто")
+                print("Модальное окно закрыто")
                 await self._random_delay(500, 1000)
-        except Exception as e:
-            print(f"Модальное окно с предупреждением не найдено")
+        except:
+            print("Модальное окно не найдено")
         
-        # 2.5. Закрываем окно с опросом (если появилось)
         try:
             print("Проверяю окно с опросом...")
             survey_close = self.page.locator('#modal-questionnaire-welcome-7 .modal__close')
@@ -456,30 +812,25 @@ class DTEKChecker:
                 await self._human_move_and_click(survey_close)
                 print("Окно с опросом закрыто")
                 await self._random_delay(500, 1000)
-        except Exception as e:
-            print(f"Окно с опросом не найдено")
+        except:
+            print("Окно с опросом не найдено")
         
-        # Случайные движения перед заполнением формы
         await self._random_mouse_movements()
         await self._random_delay(1000, 2000)
         
-        # 3. Вводим ЧАСТИЧНОЕ название города: "княж"
+        # Вводим город
         print("Ввожу город...")
         city_input = self.page.locator('.discon-input-wrapper #city')
         await city_input.wait_for(state='visible', timeout=10000)
-        
-        # Двигаем мышку к полю
         await self._human_move_and_click(city_input)
         await self._random_delay(200, 500)
         await city_input.clear()
         await self._random_delay(150, 350)
         await self._human_type(city_input, 'княж')
-        
         await city_input.dispatch_event('change')
         await self._random_delay(1800, 2500)
         
-        # 4. Кликаем на ВТОРОЙ элемент из выпадающего списка
-        print("Выбираю из списка: с. Книжичі (Броварський)...")
+        print("Выбираю из списка: с. Книжичі...")
         city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
         await city_option.wait_for(state='visible', timeout=10000)
         await self._random_delay(300, 600)
@@ -487,7 +838,7 @@ class DTEKChecker:
         print("Город выбран")
         await self._random_delay(1000, 1800)
         
-        # 5. Вводим ЧАСТИЧНОЕ название улицы: "киї"
+        # Вводим улицу
         print("Ввожу улицу...")
         street_input = self.page.locator('.discon-input-wrapper #street')
         await street_input.wait_for(state='visible', timeout=10000)
@@ -496,11 +847,9 @@ class DTEKChecker:
         await street_input.clear()
         await self._random_delay(150, 350)
         await self._human_type(street_input, 'киї')
-        
         await street_input.dispatch_event('change')
         await self._random_delay(1800, 2500)
         
-        # 6. Кликаем на ВТОРОЙ элемент из выпадающего списка
         print("Выбираю из списка: вул. Київська...")
         street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
         await street_option.wait_for(state='visible', timeout=10000)
@@ -509,7 +858,7 @@ class DTEKChecker:
         print("Улица выбрана")
         await self._random_delay(1000, 1800)
         
-        # 7. Вводим номер дома: "168"
+        # Вводим номер дома
         print("Ввожу номер дома...")
         house_input = self.page.locator('input#house_num')
         await house_input.wait_for(state='visible', timeout=10000)
@@ -518,11 +867,9 @@ class DTEKChecker:
         await house_input.clear()
         await self._random_delay(150, 350)
         await self._human_type(house_input, '168')
-        
         await house_input.dispatch_event('change')
         await self._random_delay(1800, 2500)
         
-        # 8. Кликаем на ПЕРВЫЙ элемент из выпадающего списка
         print("Выбираю из списка: 168...")
         house_option = self.page.locator('#house_numautocomplete-list > div:first-child')
         await house_option.wait_for(state='visible', timeout=10000)
@@ -531,10 +878,9 @@ class DTEKChecker:
         print("Номер дома выбран")
         await self._random_delay(2500, 3500)
         
-        # Случайные движения после заполнения
         await self._random_mouse_movements()
         
-        # 9. Получаем начальную дату обновления
+        # Получаем дату обновления
         print("Получаю дату обновления...")
         try:
             update_elem = self.page.locator('span.update')
@@ -549,7 +895,7 @@ class DTEKChecker:
         print("✅ Страница настроена и готова к мониторингу!")
     
     async def _close_survey_if_present(self):
-        """Закрывает опрос если он появился (без ошибок если его нет)"""
+        """Закрывает опрос если он появился"""
         try:
             modal = self.page.locator('#modal-questionnaire-welcome-18 .modal__container')
             if await modal.is_visible():
@@ -560,16 +906,13 @@ class DTEKChecker:
             pass
     
     async def check_for_update(self):
-        """Проверяет изменилась ли дата НА УЖЕ ОТКРЫТОЙ странице"""
+        """Проверяет изменилась ли дата"""
         try:
-            # Закрываем опрос если появился
             await self._close_survey_if_present()
             
-            # Случайные движения перед проверкой
-            if random.random() < 0.3:  # 30% шанс
+            if random.random() < 0.3:
                 await self._random_mouse_movements()
             
-            # Читаем текущую дату
             update_elem = self.page.locator('span.update')
             await update_elem.wait_for(state='visible', timeout=10000)
             current_date = await update_elem.text_content()
@@ -577,11 +920,9 @@ class DTEKChecker:
             
             print(f"Текущая дата: {current_date}, Последняя: {self.last_update_date}")
             
-            # Если дата изменилась - возвращаем True
             if current_date != self.last_update_date:
                 print("🔔 ОБНОВЛЕНИЕ ОБНАРУЖЕНО!")
                 self.last_update_date = current_date
-                # Сохраняем куки после обнаружения обновления
                 await self._save_cookies()
                 return True
             return False
@@ -590,12 +931,11 @@ class DTEKChecker:
             return False
     
     def crop_screenshot(self, screenshot_bytes, top_crop=300, bottom_crop=400, left_crop=0, right_crop=0):
-        """Обрезает скриншот: убирает верх (шапку) и низ (футер)"""
+        """Обрезает скриншот"""
         try:
             image = Image.open(io.BytesIO(screenshot_bytes))
             width, height = image.size
             
-            # Вычисляем новые границы
             left = left_crop
             top = top_crop
             right = width - right_crop
@@ -603,10 +943,8 @@ class DTEKChecker:
             
             print(f"Обрезаю скриншот: {width}x{height} -> {right-left}x{bottom-top}")
             
-            # Обрезаем
             cropped = image.crop((left, top, right, bottom))
             
-            # Конвертируем обратно в bytes
             output = io.BytesIO()
             cropped.save(output, format='PNG', optimize=True, quality=95)
             return output.getvalue()
@@ -615,21 +953,16 @@ class DTEKChecker:
             return screenshot_bytes
     
     async def make_screenshots(self):
-        """Делает скриншоты (вызывается только при обнаружении обновления)"""
+        """Делает скриншоты"""
         try:
-            # Закрываем опрос
             await self._close_survey_if_present()
-            
-            # Ждем полной загрузки графика
             await asyncio.sleep(1)
             
-            # 10. Делаем полноразмерный скриншот страницы (основной график)
             print("Делаю скриншот основного графика...")
             screenshot_main = await self.page.screenshot(full_page=True, type='png')
             screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
-            print("✓ Скриншот основного графика готов и обрезан")
+            print("✓ Скриншот основного графика готов")
             
-            # 11. Кликаем на второй элемент div.date для второго графика
             print("Кликаю на второй график (завтра)...")
             second_date = None
             screenshot_tomorrow_cropped = None
@@ -637,24 +970,20 @@ class DTEKChecker:
                 date_selector = self.page.locator('div.date:nth-child(2)')
                 await date_selector.wait_for(state='visible', timeout=10000)
                 
-                # Получаем текст даты перед кликом
                 second_date = await date_selector.text_content()
                 second_date = second_date.strip()
                 print(f"Дата второго графика: {second_date}")
                 
                 await date_selector.click()
-                await asyncio.sleep(4)  # Ждем загрузки графика
+                await asyncio.sleep(4)
                 
-                # Закрываем опрос если появился
                 await self._close_survey_if_present()
                 
-                # 12. Делаем второй скриншот
                 print("Делаю скриншот второго графика...")
                 screenshot_tomorrow = await self.page.screenshot(full_page=True, type='png')
                 screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
-                print("✓ Скриншот второго графика готов и обрезан")
+                print("✓ Скриншот второго графика готов")
                 
-                # ВОЗВРАЩАЕМСЯ на первый график
                 print("Возвращаюсь на первый график...")
                 first_date = self.page.locator('div.date:nth-child(1)')
                 await first_date.click()
@@ -690,7 +1019,7 @@ class DTEKChecker:
 checker = DTEKChecker()
 
 async def get_last_check():
-    """Получает данные последней проверки из БД через Session Pooler"""
+    """Получает данные последней проверки из БД"""
     try:
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow(
@@ -703,7 +1032,7 @@ async def get_last_check():
     return None
 
 async def save_check(update_date):
-    """Сохраняет данные проверки в БД через Session Pooler"""
+    """Сохраняет данные проверки в БД"""
     try:
         async with db_pool.acquire() as conn:
             await conn.execute(
@@ -719,18 +1048,16 @@ async def on_ready():
     print(f'✓ {bot.user} подключен к Discord!')
     print(f'✓ Мониторинг канала: {CHANNEL_ID}')
     print(f'✓ Интервал проверки: каждые 5 минут')
-    print(f'✓ Режим: постоянный браузер (без перезагрузок)')
-    print(f'🥷 STEALTH MODE: Максимальная защита от детекции')
+    print(f'🌐 Веб-интерфейс для прохождения капчи запущен на порту {PORT}')
+    print(f'🥷 STEALTH MODE активирован')
     await init_db_pool()
     await start_web_server()
-    # Инициализируем браузер один раз
-    try:
-        await checker.init_browser()
-        print("🎉 Бот полностью готов к работе!")
-    except Exception as e:
-        print(f"❌ Ошибка инициализации: {e}")
-        print("💡 Если это капча - пройдите её вручную или настройте решатель")
-        return
+    
+    # НЕ инициализируем браузер автоматически - пользователь сделает это через веб-интерфейс
+    print("💡 Откройте веб-интерфейс и нажмите 'Инициализировать браузер'")
+    print(f"🌐 URL: http://localhost:{PORT}")
+    print("🎉 Бот готов к работе!")
+    
     check_schedule.start()
 
 @tasks.loop(minutes=5)
@@ -738,6 +1065,11 @@ async def check_schedule():
     """Периодическая проверка каждые 5 минут"""
     channel = None
     try:
+        # Пропускаем если браузер не инициализирован
+        if not checker.browser or not checker.page:
+            print("⏭️ Браузер не инициализирован, пропускаю проверку")
+            return
+        
         channel = bot.get_channel(CHANNEL_ID)
         if not channel:
             print(f"❌ Канал {CHANNEL_ID} не найден!")
@@ -747,7 +1079,6 @@ async def check_schedule():
         print(f"[{datetime.now()}] Запуск автоматической проверки...")
         print(f"{'='*50}")
         
-        # Проверяем изменилась ли дата
         has_update = await checker.check_for_update()
         
         if not has_update:
@@ -755,13 +1086,9 @@ async def check_schedule():
             print(f"{'='*50}\n")
             return
         
-        # Если есть обновление - делаем скриншоты
         result = await checker.make_screenshots()
-        
-        # Сохраняем в БД
         await save_check(result['update_date'])
         
-        # Формируем embed сообщение
         embed = discord.Embed(
             title="⚡ Графік відключень ДТЕК Київські регіональні електромережі",
             description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
@@ -783,7 +1110,6 @@ async def check_schedule():
         )
         embed.set_footer(text="Нова інформація • Автоматична перевірка")
         
-        # Отправляем основной скриншот (сегодня)
         timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
         file_main = discord.File(
             io.BytesIO(result['screenshot_main']), 
@@ -792,7 +1118,6 @@ async def check_schedule():
         
         await channel.send(embed=embed, file=file_main)
         
-        # Отправляем второй скриншот (завтра), если есть
         if result['screenshot_tomorrow']:
             embed_tomorrow = discord.Embed(
                 title="📅 Графік відключень на завтра",
@@ -820,13 +1145,13 @@ async def check_schedule():
             try:
                 error_embed = discord.Embed(
                     title="⚠️ Помилка перевірки",
-                    description=f"Не вдалося виконати перевірку. Спробую знову за 5 хвилин.\n```{str(e)[:200]}```",
+                    description=f"Не вдалося виконати перевірку.\n```{str(e)[:200]}```",
                     color=discord.Color.red(),
                     timestamp=datetime.now()
                 )
                 await channel.send(embed=error_embed)
             except:
-                print("Не удалось отправить сообщение об ошибке")
+                pass
 
 @check_schedule.before_loop
 async def before_check_schedule():
@@ -837,13 +1162,14 @@ async def before_check_schedule():
 @bot.command(name='check')
 async def manual_check(ctx):
     """Ручная проверка по команде !check"""
+    if not checker.browser or not checker.page:
+        await ctx.send("❌ Браузер не інціалізовано. Відкрийте веб-інтерфейс та натисніть 'Інціалізувати браузер'")
+        return
+    
     await ctx.send("⏳ Починаю перевірку графіка відключень...")
     
     try:
-        # Принудительно делаем скриншоты
         result = await asyncio.wait_for(checker.make_screenshots(), timeout=120)
-        
-        # Обновляем БД
         await save_check(result['update_date'])
         
         embed = discord.Embed(
@@ -862,7 +1188,6 @@ async def manual_check(ctx):
         
         embed.set_footer(text="Ручна перевірка • Запущено командою !check")
         
-        # Отправляем основной скриншот
         timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
         file_main = discord.File(
             io.BytesIO(result['screenshot_main']), 
@@ -871,7 +1196,6 @@ async def manual_check(ctx):
         
         await ctx.send(embed=embed, file=file_main)
         
-        # Отправляем второй скриншот, если есть
         if result['screenshot_tomorrow']:
             embed_tomorrow = discord.Embed(
                 title="📅 Графік відключень на завтра",
@@ -890,15 +1214,11 @@ async def manual_check(ctx):
     except asyncio.TimeoutError:
         error_embed = discord.Embed(
             title="⏱️ Таймаут",
-            description="Перевірка зайняла більше 2 хвилин. Спробуйте ще раз.",
+            description="Перевірка зайняла більше 2 хвилин.",
             color=discord.Color.orange()
         )
         await ctx.send(embed=error_embed)
     except Exception as e:
-        import traceback
-        error_text = traceback.format_exc()
-        print(f"Ошибка в manual_check:\n{error_text}")
-        
         error_embed = discord.Embed(
             title="❌ Помилка",
             description=f"```{str(e)[:500]}```",
@@ -927,16 +1247,13 @@ async def bot_info(ctx):
         inline=True
     )
     
-    # Статус браузера
-    browser_status = "✅ Постійно відкритий" if checker.browser else "❌ Закритий"
-    
+    browser_status = "✅ Відкритий" if checker.browser else "❌ Закритий"
     embed.add_field(
         name="🌐 Статус браузера",
         value=browser_status,
         inline=True
     )
     
-    # Статус куков
     cookies_status = "✅ Збережено" if os.path.exists(checker.cookies_file) else "❌ Відсутні"
     embed.add_field(
         name="🍪 Куки",
@@ -952,14 +1269,14 @@ async def bot_info(ctx):
         )
     
     embed.add_field(
-        name="🥷 Захист",
-        value="• Маскування під справжній Chrome\n• Canvas/WebGL fingerprint\n• Імітація руху миші\n• Збереження куків",
+        name="🌐 Веб-інтерфейс",
+        value=f"Порт: {PORT}\nДля проходження капчі",
         inline=False
     )
     
     embed.add_field(
-        name="📝 Доступні команди",
-        value="`!check` - Ручна перевірка\n`!info` - Інформація про бота\n`!status` - Детальний статус\n`!clearcookies` - Очистити куки\n`!stop` - Зупинити бота (тільки адміни)",
+        name="📝 Команди",
+        value="`!check` - Ручна перевірка\n`!info` - Інформація\n`!status` - Детальний статус\n`!stop` - Зупинити (адміни)",
         inline=False
     )
     
@@ -967,14 +1284,13 @@ async def bot_info(ctx):
 
 @bot.command(name='status')
 async def bot_status(ctx):
-    """Детальный статус бота для диагностики"""
+    """Детальный статус бота"""
     embed = discord.Embed(
         title="🔍 Детальний статус бота",
         color=discord.Color.purple(),
         timestamp=datetime.now()
     )
     
-    # Проверяем компоненты
     playwright_status = "✅ Запущен" if checker.playwright else "❌ Не запущен"
     browser_status = "✅ Открыт" if checker.browser else "❌ Закрыт"
     page_status = "✅ Загружена" if checker.page else "❌ Не загружена"
@@ -983,44 +1299,25 @@ async def bot_status(ctx):
     embed.add_field(name="Browser", value=browser_status, inline=True)
     embed.add_field(name="Page", value=page_status, inline=True)
     
-    # Проверяем БД
     db_status = "✅ Підключено" if db_pool else "❌ Не підключено"
     embed.add_field(name="База даних", value=db_status, inline=False)
     
-    # Проверяем задачу
     task_status = "✅ Запущено" if check_schedule.is_running() else "❌ Зупинено"
     embed.add_field(name="Автоматична перевірка", value=task_status, inline=False)
     
-    # Последняя дата
     if checker.last_update_date:
         embed.add_field(name="📅 Дата на сайті", value=f"`{checker.last_update_date}`", inline=False)
     
     await ctx.send(embed=embed)
 
-@bot.command(name='clearcookies')
-async def clear_cookies(ctx):
-    """Очистка куков"""
-    try:
-        if os.path.exists(checker.cookies_file):
-            os.remove(checker.cookies_file)
-            await ctx.send("✅ Куки видалено! При наступному запуску доведеться пройти капчу знову.")
-        else:
-            await ctx.send("ℹ️ Куки відсутні")
-    except Exception as e:
-        await ctx.send(f"❌ Помилка: {str(e)[:200]}")
-
 @bot.command(name='stop')
 @commands.has_permissions(administrator=True)
 async def stop_bot(ctx):
-    """Остановка бота (только для администраторов)"""
+    """Остановка бота"""
     await ctx.send("🛑 Зупиняю бота...")
     check_schedule.cancel()
-    # Сохраняем куки перед выходом
     try:
         await checker._save_cookies()
-    except:
-        pass
-    try:
         await checker.close_browser()
     except:
         pass
@@ -1029,23 +1326,16 @@ async def stop_bot(ctx):
 
 if __name__ == '__main__':
     try:
-        print("🤖 Запуск Discord бота DTEK (режим постоянного браузера + STEALTH)...")
+        print("🤖 Запуск Discord бота DTEK с веб-интерфейсом...")
         print(f"📅 Дата: {datetime.now()}")
-        print("🥷 Максимальная защита от детекции активирована!")
+        print("🌐 Веб-интерфейс для управления браузером включен")
         bot.run(DISCORD_TOKEN)
     except KeyboardInterrupt:
         print("\n🛑 Остановка бота...")
     finally:
         try:
-            # Сохраняем куки перед выходом
             asyncio.run(checker._save_cookies())
-        except:
-            pass
-        try:
             asyncio.run(checker.close_browser())
-        except:
-            pass
-        try:
             asyncio.run(close_db_pool())
         except:
             pass
