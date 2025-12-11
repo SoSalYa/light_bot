@@ -121,13 +121,13 @@ class DTEKChecker:
         except Exception as e:
             print(f"Окно с опросом не найдено")
         
-        # 3. Вводим ЧАСТИЧНОЕ название города (как в Automa: "книж")
+        # 3. Вводим ЧАСТИЧНОЕ название города: "княж"
         print("Ввожу город...")
         city_input = self.page.locator('.discon-input-wrapper #city')
         await city_input.wait_for(state='visible', timeout=5000)
         await city_input.click()
         await city_input.clear()
-        await city_input.type('книж', delay=100)
+        await city_input.type('княж', delay=100)
         
         await city_input.dispatch_event('change')
         await asyncio.sleep(1.5)
