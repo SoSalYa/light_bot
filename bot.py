@@ -8,7 +8,6 @@ import io
 import asyncpg
 from PIL import Image
 from aiohttp import web
-import aiohttp
 import random
 import json
 import base64
@@ -21,9 +20,6 @@ PORT = int(os.getenv('PORT', 10000))
 
 # Database pool
 db_pool = None
-
-# WebSocket connections для live view
-websocket_connections = set()
 
 # Создание бота
 intents = discord.Intents.default()
@@ -339,7 +335,6 @@ async def handle_root(request):
                         img.style.display = 'block';
                         document.getElementById('loading').style.display = 'none';
                         
-                        // Сохраняем реальные размеры
                         img.onload = function() {
                             imageNaturalWidth = img.naturalWidth;
                             imageNaturalHeight = img.naturalHeight;
@@ -389,27 +384,23 @@ async def handle_root(request):
                 const img = event.target;
                 const rect = img.getBoundingClientRect();
                 
-                // Вычисляем клик относительно реального размера изображения
                 const scaleX = imageNaturalWidth / rect.width;
                 const scaleY = imageNaturalHeight / rect.height;
                 
                 const x = Math.round((event.clientX - rect.left) * scaleX);
                 const y = Math.round((event.clientY - rect.top) * scaleY);
                 
-                console.log(`Click: ${x}, ${y} (scale: ${scaleX.toFixed(2)}x${scaleY.toFixed(2)})`);
+                console.log(`Click: ${x}, ${y}`);
                 
                 try {
                     const data = await request('/api/click', 'POST', { x, y });
                     console.log(data.message);
-                    
-                    // Обновляем скриншот через секунду после клика
                     setTimeout(refreshScreenshot, 1000);
                 } catch (e) {
                     console.error('Click error:', e);
                 }
             }
             
-            // Отслеживание координат мыши
             document.getElementById('screenshot').addEventListener('mousemove', (e) => {
                 const img = e.target;
                 const rect = img.getBoundingClientRect();
@@ -441,7 +432,6 @@ async def handle_root(request):
                 }
             }
             
-            // Автообновление
             function startAutoRefresh() {
                 autoRefresh = setInterval(() => {
                     refreshScreenshot();
@@ -449,7 +439,6 @@ async def handle_root(request):
                 }, 3000);
             }
             
-            // Инициализация
             window.onload = async () => {
                 await updateStatus();
                 await refreshScreenshot();
@@ -487,7 +476,6 @@ async def handle_click(request):
         x = data.get('x', 0)
         y = data.get('y', 0)
         
-        # Кликаем в браузере
         await checker.page.mouse.click(x, y)
         print(f"Remote click: ({x}, {y})")
         
@@ -557,11 +545,9 @@ async def start_web_server():
     """Запуск веб-сервера с VNC интерфейсом"""
     app = web.Application()
     
-    # Основные endpoints
     app.router.add_get('/', handle_root)
     app.router.add_get('/health', handle_health)
     
-    # API endpoints
     app.router.add_get('/api/screenshot', handle_screenshot)
     app.router.add_post('/api/click', handle_click)
     app.router.add_get('/api/init', handle_init)
@@ -573,8 +559,7 @@ async def start_web_server():
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    print(f"✓ Web server with VNC interface started on port {PORT}")
-    print(f"🌐 Open in browser: http://localhost:{PORT}")
+    print(f"✓ Web server started on port {PORT}")
 
 class DTEKChecker:
     def __init__(self):
@@ -586,18 +571,14 @@ class DTEKChecker:
         self.cookies_file = 'dtek_cookies.json'
     
     def _get_random_user_agent(self):
-        """Возвращает случайный реальный User-Agent"""
         user_agents = [
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
             'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
             'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64; rv:133.0) Gecko/20100101 Firefox/133.0',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15',
         ]
         return random.choice(user_agents)
     
     async def _save_cookies(self):
-        """Сохраняет куки в файл"""
         try:
             if self.context:
                 cookies = await self.context.cookies()
@@ -608,7 +589,6 @@ class DTEKChecker:
             print(f"⚠ Не удалось сохранить куки: {e}")
     
     async def _load_cookies(self):
-        """Загружает куки из файла"""
         try:
             if os.path.exists(self.cookies_file):
                 with open(self.cookies_file, 'r') as f:
@@ -621,45 +601,29 @@ class DTEKChecker:
         return False
     
     async def _random_delay(self, min_ms=100, max_ms=500):
-        """Случайная задержка для имитации человека"""
         await asyncio.sleep(random.uniform(min_ms/1000, max_ms/1000))
     
     async def _human_move_and_click(self, locator):
-        """Клик с имитацией движения мышкой как у человека"""
         try:
             box = await locator.bounding_box()
             if box:
                 x = box['x'] + random.uniform(box['width'] * 0.3, box['width'] * 0.7)
                 y = box['y'] + random.uniform(box['height'] * 0.3, box['height'] * 0.7)
-                
-                current_pos = await self.page.evaluate('() => [window.mouseX || 0, window.mouseY || 0]')
-                steps = random.randint(10, 20)
-                for i in range(steps):
-                    intermediate_x = current_pos[0] + (x - current_pos[0]) * (i / steps)
-                    intermediate_y = current_pos[1] + (y - current_pos[1]) * (i / steps)
-                    await self.page.mouse.move(
-                        intermediate_x + random.uniform(-2, 2), 
-                        intermediate_y + random.uniform(-2, 2)
-                    )
-                    await asyncio.sleep(random.uniform(0.001, 0.003))
-                
+                await self.page.mouse.move(x, y)
                 await self._random_delay(50, 150)
-                
             await locator.click()
         except:
             await locator.click()
-async def _human_type(self, locator, text):
-        """Ввод текста с человеческой скоростью"""
+    
+    async def _human_type(self, locator, text):
         await locator.click()
         await self._random_delay(100, 300)
-        
         for char in text:
             if random.random() < 0.1:
                 await self._random_delay(300, 800)
             await locator.press_sequentially(char, delay=random.uniform(50, 200))
     
     async def _random_mouse_movements(self):
-        """Случайные движения мышкой"""
         try:
             for _ in range(random.randint(2, 5)):
                 x = random.randint(100, 1800)
@@ -670,7 +634,6 @@ async def _human_type(self, locator, text):
             pass
     
     async def init_browser(self):
-        """Инициализация браузера и открытие страницы"""
         if not self.playwright:
             self.playwright = await async_playwright().start()
             
@@ -679,13 +642,6 @@ async def _human_type(self, locator, text):
                 '--disable-setuid-sandbox',
                 '--disable-blink-features=AutomationControlled',
                 '--disable-dev-shm-usage',
-                '--disable-web-security',
-                '--disable-features=IsolateOrigins,site-per-process',
-                '--allow-running-insecure-content',
-                '--disable-notifications',
-                '--disable-popup-blocking',
-                '--start-maximized',
-                '--disable-infobars',
                 '--window-size=1920,1080',
             ]
             
@@ -695,13 +651,13 @@ async def _human_type(self, locator, text):
                     args=browser_args,
                     channel='chrome'
                 )
-                print("✓ Запущен настоящий Chrome")
+                print("✓ Chrome запущен")
             except:
                 self.browser = await self.playwright.chromium.launch(
                     headless=True,
                     args=browser_args
                 )
-                print("✓ Запущен Chromium")
+                print("✓ Chromium запущен")
             
             user_agent = self._get_random_user_agent()
             
@@ -710,42 +666,14 @@ async def _human_type(self, locator, text):
                 locale='uk-UA',
                 timezone_id='Europe/Kiev',
                 user_agent=user_agent,
-                device_scale_factor=1,
-                has_touch=False,
-                is_mobile=False,
-                color_scheme='light',
-                permissions=['geolocation'],
                 geolocation={'latitude': 50.4501, 'longitude': 30.5234},
-                extra_http_headers={
-                    'Accept': 'text/html,application/xhtml+xml,application/xml;q=0.9,image/avif,image/webp,image/apng,*/*;q=0.8',
-                    'Accept-Language': 'uk-UA,uk;q=0.9,en-US;q=0.8,en;q=0.7,ru;q=0.6',
-                    'Accept-Encoding': 'gzip, deflate, br',
-                    'DNT': '1',
-                    'Connection': 'keep-alive',
-                    'Upgrade-Insecure-Requests': '1',
-                    'Sec-Fetch-Dest': 'document',
-                    'Sec-Fetch-Mode': 'navigate',
-                    'Sec-Fetch-Site': 'none',
-                    'Sec-Fetch-User': '?1',
-                    'Cache-Control': 'max-age=0',
-                }
             )
             
             await self.context.add_init_script("""
                 Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                window.navigator.chrome = { runtime: {}, loadTimes: function() {}, csi: function() {}, app: {} };
-                Object.defineProperty(navigator, 'plugins', {
-                    get: () => [
-                        {0: {type: "application/x-google-chrome-pdf"}, description: "Portable Document Format", filename: "internal-pdf-viewer", length: 1, name: "Chrome PDF Plugin"},
-                        {0: {type: "application/pdf"}, description: "Portable Document Format", filename: "mhjfbmdgcfjbbpaeojofohoefgiehjai", length: 1, name: "Chrome PDF Viewer"}
-                    ]
-                });
-                Object.defineProperty(navigator, 'languages', { get: () => ['uk-UA', 'uk', 'en-US', 'en', 'ru'] });
-                document.addEventListener('mousemove', (e) => { window.mouseX = e.clientX; window.mouseY = e.clientY; });
-                console.log('🥷 Stealth mode activated');
+                window.navigator.chrome = { runtime: {} };
+                Object.defineProperty(navigator, 'languages', { get: () => ['uk-UA', 'uk'] });
             """)
-            
-            print("✓ Браузер инициализирован с защитой от детекции")
             
             self.page = await self.context.new_page()
             await self._load_cookies()
@@ -753,146 +681,78 @@ async def _human_type(self, locator, text):
             await self._save_cookies()
     
     async def _setup_page(self):
-        """Настройка страницы"""
-        print(f"[{datetime.now()}] Начинаю настройку страницы...")
-        
-        print("Открываю страницу DTEK...")
-        await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', 
-                      wait_until='networkidle', timeout=60000)
-        
-        await self._random_mouse_movements()
+        print("Настройка страницы...")
+        await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='networkidle', timeout=60000)
         await self._random_delay(3000, 5000)
         
-        # Проверяем капчу
         try:
-            print("Проверяю наличие капчи...")
             captcha_checkbox = self.page.locator('iframe[src*="checkbox"]')
-            
             if await captcha_checkbox.count() > 0:
-                print("⚠️ Обнаружена hCaptcha!")
-                print("💡 Используйте веб-интерфейс для прохождения капчи")
-                print(f"🌐 Откройте: http://localhost:{PORT}")
-                print("⏳ Жду прохождения капчи...")
-                
-                # Ждем пока капча не исчезнет
-                for i in range(300):  # 5 минут
+                print("⚠️ Обнаружена капча! Используйте веб-интерфейс.")
+                for i in range(300):
                     await asyncio.sleep(1)
                     if await captcha_checkbox.count() == 0:
                         print("✓ Капча пройдена!")
                         await self._save_cookies()
                         break
-                    if i == 299:
-                        print("⚠️ Капча не пройдена за 5 минут")
-                        raise Exception("Не удалось пройти капчу")
-        except Exception as e:
-            if "Не удалось пройти капчу" in str(e):
-                raise
-            print(f"Капча не обнаружена или уже пройдена")
+        except:
+            pass
         
         await self._random_delay(1500, 2500)
-        await self._random_mouse_movements()
         
-        # Закрываем модальные окна
         try:
-            print("Проверяю модальное окно...")
             close_btn = self.page.locator('button.m-attention__close')
             if await close_btn.count() > 0:
-                await self._random_delay(500, 1000)
                 await self._human_move_and_click(close_btn)
-                print("Модальное окно закрыто")
-                await self._random_delay(500, 1000)
         except:
-            print("Модальное окно не найдено")
+            pass
         
-        try:
-            print("Проверяю окно с опросом...")
-            survey_close = self.page.locator('#modal-questionnaire-welcome-7 .modal__close')
-            if await survey_close.count() > 0:
-                await self._random_delay(500, 1000)
-                await self._human_move_and_click(survey_close)
-                print("Окно с опросом закрыто")
-                await self._random_delay(500, 1000)
-        except:
-            print("Окно с опросом не найдено")
-        
-        await self._random_mouse_movements()
-        await self._random_delay(1000, 2000)
-        
-        # Вводим город
-        print("Ввожу город...")
         city_input = self.page.locator('.discon-input-wrapper #city')
         await city_input.wait_for(state='visible', timeout=10000)
         await self._human_move_and_click(city_input)
-        await self._random_delay(200, 500)
         await city_input.clear()
-        await self._random_delay(150, 350)
         await self._human_type(city_input, 'княж')
-        await city_input.dispatch_event('change')
         await self._random_delay(1800, 2500)
         
-        print("Выбираю из списка: с. Книжичі...")
         city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
         await city_option.wait_for(state='visible', timeout=10000)
-        await self._random_delay(300, 600)
         await self._human_move_and_click(city_option)
-        print("Город выбран")
         await self._random_delay(1000, 1800)
         
-        # Вводим улицу
-        print("Ввожу улицу...")
         street_input = self.page.locator('.discon-input-wrapper #street')
         await street_input.wait_for(state='visible', timeout=10000)
         await self._human_move_and_click(street_input)
-        await self._random_delay(200, 500)
         await street_input.clear()
-        await self._random_delay(150, 350)
         await self._human_type(street_input, 'киї')
-        await street_input.dispatch_event('change')
         await self._random_delay(1800, 2500)
         
-        print("Выбираю из списка: вул. Київська...")
         street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
         await street_option.wait_for(state='visible', timeout=10000)
-        await self._random_delay(300, 600)
         await self._human_move_and_click(street_option)
-        print("Улица выбрана")
         await self._random_delay(1000, 1800)
         
-        # Вводим номер дома
-        print("Ввожу номер дома...")
         house_input = self.page.locator('input#house_num')
         await house_input.wait_for(state='visible', timeout=10000)
         await self._human_move_and_click(house_input)
-        await self._random_delay(200, 500)
         await house_input.clear()
-        await self._random_delay(150, 350)
         await self._human_type(house_input, '168')
-        await house_input.dispatch_event('change')
         await self._random_delay(1800, 2500)
         
-        print("Выбираю из списка: 168...")
         house_option = self.page.locator('#house_numautocomplete-list > div:first-child')
         await house_option.wait_for(state='visible', timeout=10000)
-        await self._random_delay(300, 600)
         await self._human_move_and_click(house_option)
-        print("Номер дома выбран")
         await self._random_delay(2500, 3500)
         
-        await self._random_mouse_movements()
-        
-        # Получаем дату обновления
-        print("Получаю дату обновления...")
         try:
             update_elem = self.page.locator('span.update')
             await update_elem.wait_for(state='visible', timeout=15000)
             self.last_update_date = await update_elem.text_content()
             self.last_update_date = self.last_update_date.strip()
             print(f"✓ Дата обновления: {self.last_update_date}")
-        except Exception as e:
-            print(f"⚠ Не удалось получить дату обновления: {e}")
+        except:
             self.last_update_date = "Невідомо"
         
-        print("✅ Страница настроена и готова к мониторингу!")
+        print("✅ Страница настроена!")
     
     async def _close_survey_if_present(self):
         """Закрывает опрос если он появился"""
