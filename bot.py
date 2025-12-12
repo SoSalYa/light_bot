@@ -826,16 +826,20 @@ class DTEKChecker:
             return screenshot_bytes
     
     async def make_screenshots(self):
-        """Делает скриншоты"""
-        try:
-            await self._close_survey_if_present()
-            await asyncio.sleep(1)
-            
-            print("Делаю скриншот основного графика...")
-            screenshot_main = await asyncio.wait_for(
-                self.page.screenshot(full_page=True, type='png'),
-                timeout=30
-            )
+    """Делает скриншоты"""
+    try:
+        # Сначала закрываем все модальные окна
+        await self._close_survey_if_present()
+        await asyncio.sleep(1)
+        
+        # Проверяем еще раз перед основными действиями
+        await self._close_survey_if_present()
+        
+        print("Делаю скриншот основного графика...")
+        screenshot_main = await asyncio.wait_for(
+            self.page.screenshot(full_page=True, type='png'),
+            timeout=30
+        )
             screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
             print("✓ Скриншот основного графика готов")
             
