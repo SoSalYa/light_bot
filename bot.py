@@ -625,12 +625,15 @@ class DTEKChecker:
             await locator.click()
     
     async def _human_type(self, locator, text):
+        """Вводит текст с человекоподобной скоростью и задержками"""
         await locator.click()
         await self._random_delay(100, 300)
         for char in text:
             if random.random() < 0.1:
                 await self._random_delay(300, 800)
             await locator.press_sequentially(char, delay=random.uniform(50, 200))
+        # Дополнительная задержка после завершения ввода
+        await asyncio.sleep(1.5)
     
     async def _random_mouse_movements(self):
         try:
@@ -802,8 +805,66 @@ class DTEKChecker:
         except:
             return False
 
+    async def _wait_for_autocomplete(self, list_id, timeout=20000):
+        """Ждет появления списка автокомплита"""
+        try:
+            # Сначала ждем появления самого контейнера списка
+            await self.page.wait_for_selector(f'#{list_id}', state='visible', timeout=timeout)
+            await asyncio.sleep(0.5)
+            
+            # Проверяем что в нем есть элементы
+            items = self.page.locator(f'#{list_id} > div')
+            count = await items.count()
+            
+            if count > 0:
+                print(f"✓ Список {list_id} содержит {count} элементов")
+                return True
+            else:
+                print(f"⚠ Список {list_id} пуст")
+                return False
+        except Exception as e:
+            print(f"⚠ Список {list_id} не появился: {e}")
+            return False
+    
+    async def _fill_form_with_js_fallback(self):
+        """Заполняет форму через JavaScript (fallback метод)"""
+        print("🔧 Использую JavaScript для заполнения формы...")
+        try:
+            await self.page.evaluate("""
+                () => {
+                    // Находим и заполняем поля
+                    const cityInput = document.querySelector('#city');
+                    const streetInput = document.querySelector('#street');
+                    const houseInput = document.querySelector('#house_num');
+                    
+                    if (cityInput) {
+                        cityInput.value = 'Книжичі';
+                        cityInput.dispatchEvent(new Event('input', { bubbles: true }));
+                        cityInput.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                    
+                    if (streetInput) {
+                        streetInput.value = 'Київська';
+                        streetInput.dispatchEvent(new Event('input', { bubbles: true }));
+                        streetInput.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                    
+                    if (houseInput) {
+                        houseInput.value = '168';
+                        houseInput.dispatchEvent(new Event('input', { bubbles: true }));
+                        houseInput.dispatchEvent(new Event('change', { bubbles: true }));
+                    }
+                }
+            """)
+            await asyncio.sleep(3)
+            print("✓ Форма заполнена через JavaScript")
+            return True
+        except Exception as e:
+            print(f"❌ Ошибка при заполнении через JavaScript: {e}")
+            return False
+    
     async def _setup_page(self):
-        """Настройка страницы - УЛУЧШЕННАЯ версия"""
+        """Настройка страницы - УЛУЧШЕННАЯ версия с пропуском если есть куки"""
         print("Настройка страницы...")
         await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='networkidle', timeout=60000)
         await self._random_delay(3000, 5000)
@@ -830,6 +891,20 @@ class DTEKChecker:
         await self._random_delay(1500, 2500)
         await self._close_survey_if_present()
         
+        # Проверяем, может форма уже заполнена (есть куки)
+        try:
+            update_elem = self.page.locator('span.update')
+            if await update_elem.count() > 0 and await update_elem.is_visible():
+                self.last_update_date = await update_elem.text_content()
+                self.last_update_date = self.last_update_date.strip()
+                print(f"✓ Форма уже заполнена, дата: {self.last_update_date}")
+                print("✅ Страница настроена (пропущено заполнение формы)!")
+                return
+        except:
+            pass
+        
+        print("📝 Начинаю заполнение формы...")
+        
         # Закрываем рекламу
         try:
             close_btn = self.page.locator('button.m-attention__close')
@@ -838,63 +913,99 @@ class DTEKChecker:
         except:
             pass
         
-        # Город
-        print("Заполняю город...")
-        city_input = self.page.locator('.discon-input-wrapper #city')
-        await city_input.wait_for(state='visible', timeout=15000)
-        await self._human_move_and_click(city_input)
-        await city_input.clear()
-        await self._human_type(city_input, 'кніж')
-        await self._random_delay(1800, 2500)
+        # Счетчик успешных заполнений
+        form_filled_successfully = False
         
-        # Ждем список городов с более длинным таймаутом и проверкой
-        city_option = self.page.locator('#cityautocomplete-list > div').nth(1)
         try:
-            await city_option.wait_for(state='visible', timeout=15000)
-            await self._human_move_and_click(city_option)
-        except:
-            # Пробуем альтернативный селектор
-            print("⚠ Пробую альтернативный селектор города...")
-            city_option_alt = self.page.locator('#cityautocomplete-list div').first
-            await city_option_alt.wait_for(state='visible', timeout=15000)
-            await self._human_move_and_click(city_option_alt)
+            # Город
+            print("Заполняю город...")
+            city_input = self.page.locator('.discon-input-wrapper #city')
+            await city_input.wait_for(state='visible', timeout=15000)
+            await self._human_move_and_click(city_input)
+            await city_input.clear()
+            await asyncio.sleep(0.5)
+            await self._human_type(city_input, 'кніж')
+            
+            # Ждем появления списка автокомплита
+            print("Ожидаю список городов...")
+            if await self._wait_for_autocomplete('cityautocomplete-list', timeout=20000):
+                try:
+                    # Пробуем кликнуть на второй элемент (первый обычно заголовок)
+                    city_option = self.page.locator('#cityautocomplete-list > div').nth(1)
+                    await city_option.wait_for(state='visible', timeout=5000)
+                    await self._human_move_and_click(city_option)
+                    print("✓ Город выбран")
+                except:
+                    print("⚠ Пробую первый элемент списка городов...")
+                    city_option = self.page.locator('#cityautocomplete-list > div').first
+                    await city_option.click()
+            else:
+                print("⚠ Автокомплит города не сработал, нажимаю Enter...")
+                await city_input.press('Enter')
+            
+            await self._random_delay(1000, 1800)
+            
+            # Улица
+            print("Заполняю улицу...")
+            street_input = self.page.locator('.discon-input-wrapper #street')
+            await street_input.wait_for(state='visible', timeout=15000)
+            await self._human_move_and_click(street_input)
+            await street_input.clear()
+            await asyncio.sleep(0.5)
+            await self._human_type(street_input, 'київ')
+            
+            # Ждем появления списка улиц
+            print("Ожидаю список улиц...")
+            if await self._wait_for_autocomplete('streetautocomplete-list', timeout=20000):
+                try:
+                    street_option = self.page.locator('#streetautocomplete-list > div').nth(1)
+                    await street_option.wait_for(state='visible', timeout=5000)
+                    await self._human_move_and_click(street_option)
+                    print("✓ Улица выбрана")
+                except:
+                    print("⚠ Пробую первый элемент списка улиц...")
+                    street_option = self.page.locator('#streetautocomplete-list > div').first
+                    await street_option.click()
+            else:
+                print("⚠ Автокомплит улицы не сработал, нажимаю Enter...")
+                await street_input.press('Enter')
+            
+            await self._random_delay(1000, 1800)
+            
+            # Дом
+            print("Заполняю номер дома...")
+            house_input = self.page.locator('input#house_num')
+            await house_input.wait_for(state='visible', timeout=15000)
+            await self._human_move_and_click(house_input)
+            await house_input.clear()
+            await asyncio.sleep(0.5)
+            await self._human_type(house_input, '168')
+            
+            # Ждем появления списка домов
+            print("Ожидаю список домов...")
+            if await self._wait_for_autocomplete('house_numautocomplete-list', timeout=20000):
+                try:
+                    house_option = self.page.locator('#house_numautocomplete-list > div').first
+                    await house_option.wait_for(state='visible', timeout=5000)
+                    await self._human_move_and_click(house_option)
+                    print("✓ Дом выбран")
+                except:
+                    print("⚠ Пробую кликнуть любой элемент списка домов...")
+                    await self.page.locator('#house_numautocomplete-list').click()
+            else:
+                print("⚠ Автокомплит дома не сработал, нажимаю Enter...")
+                await house_input.press('Enter')
+            
+            await self._random_delay(2500, 3500)
+            form_filled_successfully = True
+            
+        except Exception as e:
+            print(f"⚠ Ошибка при заполнении формы через UI: {e}")
+            print("🔄 Пробую запасной метод через JavaScript...")
+            form_filled_successfully = await self._fill_form_with_js_fallback()
         
-        await self._random_delay(1000, 1800)
-        
-        # Улица
-        print("Заполняю улицу...")
-        street_input = self.page.locator('.discon-input-wrapper #street')
-        await street_input.wait_for(state='visible', timeout=15000)
-        await self._human_move_and_click(street_input)
-        await street_input.clear()
-        await self._human_type(street_input, 'київ')
-        await self._random_delay(1800, 2500)
-        
-        street_option = self.page.locator('#streetautocomplete-list > div').nth(1)
-        try:
-            await street_option.wait_for(state='visible', timeout=15000)
-            await self._human_move_and_click(street_option)
-        except:
-            print("⚠ Пробую альтернативный селектор улицы...")
-            street_option_alt = self.page.locator('#streetautocomplete-list div').first
-            await street_option_alt.wait_for(state='visible', timeout=15000)
-            await self._human_move_and_click(street_option_alt)
-        
-        await self._random_delay(1000, 1800)
-        
-        # Дом
-        print("Заполняю номер дома...")
-        house_input = self.page.locator('input#house_num')
-        await house_input.wait_for(state='visible', timeout=15000)
-        await self._human_move_and_click(house_input)
-        await house_input.clear()
-        await self._human_type(house_input, '168')
-        await self._random_delay(1800, 2500)
-        
-        house_option = self.page.locator('#house_numautocomplete-list > div').first
-        await house_option.wait_for(state='visible', timeout=15000)
-        await self._human_move_and_click(house_option)
-        await self._random_delay(2500, 3500)
+        if not form_filled_successfully:
+            print("⚠️ Форма не была заполнена, но продолжаю...")
         
         # Финальная проверка опроса
         await self._close_survey_if_present()
@@ -906,8 +1017,23 @@ class DTEKChecker:
             self.last_update_date = await update_elem.text_content()
             self.last_update_date = self.last_update_date.strip()
             print(f"✓ Дата обновления: {self.last_update_date}")
-        except:
+        except Exception as e:
             self.last_update_date = "Невідомо"
+            print(f"⚠ Не удалось получить дату обновления: {e}")
+            # Если не получилось получить дату - возможно форма не заполнена
+            # Пробуем еще раз через JavaScript
+            if not form_filled_successfully:
+                print("🔄 Последняя попытка заполнения через JavaScript...")
+                await self._fill_form_with_js_fallback()
+                await asyncio.sleep(3)
+                try:
+                    update_elem = self.page.locator('span.update')
+                    await update_elem.wait_for(state='visible', timeout=10000)
+                    self.last_update_date = await update_elem.text_content()
+                    self.last_update_date = self.last_update_date.strip()
+                    print(f"✓ Дата обновления (после retry): {self.last_update_date}")
+                except:
+                    print("❌ Не удалось получить дату даже после повторной попытки")
         
         print("✅ Страница настроена!")
 
