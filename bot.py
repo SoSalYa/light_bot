@@ -760,76 +760,76 @@ class DTEKChecker:
         finally:
             self.initialization_in_progress = False
     
-    async def _close_survey_if_present(self):
-    """Закрывает опрос если он появился - улучшенная версия"""
-    try:
-        # 1. Пробуем найти модальное окно по паттерну с любым номером
-        # Используем JavaScript для поиска элемента с подходящим ID
-        modal_found = await self.page.evaluate("""
-            () => {
-                // Ищем все элементы с ID начинающим на modal-questionnaire-welcome-
-                const modals = document.querySelectorAll('[id^="modal-questionnaire-welcome-"]');
-                for (const modal of modals) {
-                    // Проверяем видимость модального окна
-                    const style = window.getComputedStyle(modal);
-                    if (style.display !== 'none' && style.visibility !== 'hidden') {
-                        return modal.id;
-                    }
-                }
-                return null;
-            }
-        """)
-        
-        if modal_found:
-            print(f"✓ Найдено модальное окно опроса: {modal_found}")
-            
-            # Пробуем закрыть через специфичный селектор
-            close_selector = f"#{modal_found} .modal__close"
-            close_btn = self.page.locator(close_selector)
-            
-            if await close_btn.count() > 0:
-                await close_btn.click()
-                await asyncio.sleep(1)
-                print(f"✓ Опрос закрыт через селектор: {close_selector}")
-                return True
-        
-        # 2. Дополнительная проверка - ищем кнопку закрытия по общим селекторам
-        generic_selectors = [
-            '.modal__close',
-            'button.modal__close',
-            '.modal .modal__close',
-            'button[aria-label="Close"]',
-            '.questionnaire .modal__close'
-        ]
-        
-        for selector in generic_selectors:
-            close_btn = self.page.locator(selector)
-            if await close_btn.count() > 0 and await close_btn.is_visible():
-                await close_btn.click()
-                await asyncio.sleep(1)
-                print(f"✓ Опрос закрыт через общий селектор: {selector}")
-                return True
-        
-        # 3. Альтернативный метод - поиск через текст кнопки
+async def _close_survey_if_present(self):
+        """Закрывает опрос если он появился - улучшенная версия"""
         try:
-            # Ищем кнопку с крестиком или текстом закрытия
-            close_by_text = self.page.locator('button:has-text("×"), button:has-text("✕")')
-            if await close_by_text.count() > 0:
-                first_close = close_by_text.first
-                if await first_close.is_visible():
-                    await first_close.click()
-                    await asyncio.sleep(1)
-                    print("✓ Опрос закрыт через поиск по символу закрытия")
-                    return True
-        except:
-            pass
-        
-        print("⚪ Модальное окно опроса не найдено")
-        return False
+            # 1. Пробуем найти модальное окно по паттерну с любым номером
+            # Используем JavaScript для поиска элемента с подходящим ID
+            modal_found = await self.page.evaluate("""
+                () => {
+                    // Ищем все элементы с ID начинающим на modal-questionnaire-welcome-
+                    const modals = document.querySelectorAll('[id^="modal-questionnaire-welcome-"]');
+                    for (const modal of modals) {
+                        // Проверяем видимость модального окна
+                        const style = window.getComputedStyle(modal);
+                        if (style.display !== 'none' && style.visibility !== 'hidden') {
+                            return modal.id;
+                        }
+                    }
+                    return null;
+                }
+            """)
+            
+            if modal_found:
+                print(f"✓ Найдено модальное окно опроса: {modal_found}")
                 
-    except Exception as e:
-        print(f"⚠ Ошибка при закрытии опроса: {e}")
-        return False
+                # Пробуем закрыть через специфичный селектор
+                close_selector = f"#{modal_found} .modal__close"
+                close_btn = self.page.locator(close_selector)
+                
+                if await close_btn.count() > 0:
+                    await close_btn.click()
+                    await asyncio.sleep(1)
+                    print(f"✓ Опрос закрыт через селектор: {close_selector}")
+                    return True
+            
+            # 2. Дополнительная проверка - ищем кнопку закрытия по общим селекторам
+            generic_selectors = [
+                '.modal__close',
+                'button.modal__close',
+                '.modal .modal__close',
+                'button[aria-label="Close"]',
+                '.questionnaire .modal__close'
+            ]
+            
+            for selector in generic_selectors:
+                close_btn = self.page.locator(selector)
+                if await close_btn.count() > 0 and await close_btn.is_visible():
+                    await close_btn.click()
+                    await asyncio.sleep(1)
+                    print(f"✓ Опрос закрыт через общий селектор: {selector}")
+                    return True
+            
+            # 3. Альтернативный метод - поиск через текст кнопки
+            try:
+                # Ищем кнопку с крестиком или текстом закрытия
+                close_by_text = self.page.locator('button:has-text("×"), button:has-text("✕")')
+                if await close_by_text.count() > 0:
+                    first_close = close_by_text.first
+                    if await first_close.is_visible():
+                        await first_close.click()
+                        await asyncio.sleep(1)
+                        print("✓ Опрос закрыт через поиск по символу закрытия")
+                        return True
+            except:
+                pass
+            
+            print("⚪ Модальное окно опроса не найдено")
+            return False
+                    
+        except Exception as e:
+            print(f"⚠ Ошибка при закрытии опроса: {e}")
+            return False
 
     async def _wait_and_close_survey(self, timeout=3):
         """Ждет появления опроса и закрывает его"""
