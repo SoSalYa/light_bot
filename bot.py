@@ -263,7 +263,6 @@ async def handle_root(request):
                     <li><strong>Обновить скриншот</strong> - получить актуальное изображение</li>
                     <li><strong>Пройти капчу</strong> - кликайте по элементам капчи прямо на скриншоте</li>
                     <li>Скриншоты обновляются автоматически каждые 3 секунды</li>
-                    <li><strong>Браузер автоматически переподключается</strong> при сбоях</li>
                 </ul>
             </div>
             
@@ -271,7 +270,7 @@ async def handle_root(request):
                 <h2>🎮 Панель управления</h2>
                 <div class="buttons">
                     <button class="btn-primary" onclick="refreshScreenshot()">🔄 Обновить скриншот</button>
-                    <button class="btn-success" onclick="initBrowser()">🚀 Реинициализировать браузер</button>
+                    <button class="btn-success" onclick="initBrowser()">🚀 Инициализировать браузер</button>
                     <button class="btn-info" onclick="manualCheck()">✅ Сделать проверку</button>
                     <button class="btn-danger" onclick="clearCookies()">🍪 Очистить куки</button>
                 </div>
@@ -454,9 +453,6 @@ async def handle_root(request):
 async def handle_screenshot(request):
     """API: Получить скриншот браузера"""
     try:
-        # Проверка и автовосстановление
-        await checker.ensure_browser_ready()
-        
         if not checker.page:
             return web.json_response({'error': 'Browser not initialized'}, status=400)
         
@@ -473,8 +469,6 @@ async def handle_screenshot(request):
 async def handle_click(request):
     """API: Передать клик в браузер"""
     try:
-        await checker.ensure_browser_ready()
-        
         if not checker.page:
             return web.json_response({'error': 'Browser not initialized'}, status=400)
         
@@ -538,7 +532,7 @@ async def handle_clear_cookies(request):
 
 async def handle_status(request):
     """API: Получить статус бота"""
-    browser_status = "✅ Открыт" if checker.browser and checker.page else "❌ Закрыт"
+    browser_status = "✅ Открыт" if checker.browser else "❌ Закрыт"
     cookies_status = "✅ Есть" if os.path.exists(checker.cookies_file) else "❌ Нет"
     
     return web.json_response({
@@ -575,9 +569,6 @@ class DTEKChecker:
         self.page = None
         self.last_update_date = None
         self.cookies_file = 'dtek_cookies.json'
-        self.initialization_in_progress = False
-        self.last_browser_check = datetime.now()
-        self.is_fully_initialized = False  # НОВЫЙ флаг для отслеживания полной инициализации
     
     def _get_random_user_agent(self):
         user_agents = [
@@ -625,15 +616,12 @@ class DTEKChecker:
             await locator.click()
     
     async def _human_type(self, locator, text):
-        """Вводит текст с человекоподобной скоростью и задержками"""
         await locator.click()
         await self._random_delay(100, 300)
         for char in text:
             if random.random() < 0.1:
                 await self._random_delay(300, 800)
             await locator.press_sequentially(char, delay=random.uniform(50, 200))
-        # Дополнительная задержка после завершения ввода
-        await asyncio.sleep(1.5)
     
     async def _random_mouse_movements(self):
         try:
@@ -645,129 +633,63 @@ class DTEKChecker:
         except:
             pass
     
-    async def is_browser_alive(self):
-        """Проверяет, жив ли браузер"""
-        try:
-            if not self.browser or not self.page:
-                return False
-            
-            # Пробуем выполнить простую операцию
-            await asyncio.wait_for(self.page.evaluate('() => true'), timeout=5)
-            return True
-        except Exception as e:
-            print(f"⚠ Браузер не отвечает: {e}")
-            return False
-    
-    async def ensure_browser_ready(self):
-        """Гарантирует, что браузер готов к работе, переинициализирует если нужно"""
-        if self.initialization_in_progress:
-            print("⏳ Инициализация уже выполняется, ждем...")
-            while self.initialization_in_progress:
-                await asyncio.sleep(1)
-            return
-        
-        # Проверяем состояние браузера каждые 30 секунд
-        now = datetime.now()
-        if (now - self.last_browser_check).total_seconds() < 30:
-            if self.browser and self.page and self.is_fully_initialized:
-                return
-        
-        self.last_browser_check = now
-        
-        if not await self.is_browser_alive():
-            print("🔄 Браузер не активен, переинициализация...")
-            try:
-                await self.close_browser()
-            except:
-                pass
-            
-            await self.init_browser()
-    
     async def init_browser(self):
-        """Инициализация браузера с защитой от повторного вызова"""
-        if self.initialization_in_progress:
-            print("⚠ Инициализация уже выполняется")
-            return
-        
-        self.initialization_in_progress = True
-        self.is_fully_initialized = False
-        
-        try:
-            print("🚀 Запуск браузера...")
+        if not self.playwright:
+            self.playwright = await async_playwright().start()
             
-            if not self.playwright:
-                self.playwright = await async_playwright().start()
-                
-                browser_args = [
-                    '--no-sandbox',
-                    '--disable-setuid-sandbox',
-                    '--disable-blink-features=AutomationControlled',
-                    '--disable-dev-shm-usage',
-                    '--window-size=1920,1080',
-                ]
-                
-                try:
-                    self.browser = await self.playwright.chromium.launch(
-                        headless=True,
-                        args=browser_args,
-                        channel='chrome'
-                    )
-                    print("✓ Chrome запущен")
-                except:
-                    self.browser = await self.playwright.chromium.launch(
-                        headless=True,
-                        args=browser_args
-                    )
-                    print("✓ Chromium запущен")
-                
-                user_agent = self._get_random_user_agent()
-                
-                self.context = await self.browser.new_context(
-                    viewport={'width': 1920, 'height': 1080},
-                    locale='uk-UA',
-                    timezone_id='Europe/Kiev',
-                    user_agent=user_agent,
-                    geolocation={'latitude': 50.4501, 'longitude': 30.5234},
-                )
-                
-                await self.context.add_init_script("""
-                    Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                    window.navigator.chrome = { runtime: {} };
-                    Object.defineProperty(navigator, 'languages', { get: () => ['uk-UA', 'uk'] });
-                """)
-                
-                self.page = await self.context.new_page()
-                await self._load_cookies()
-                
-                print("✓ Браузер создан, начинаем настройку страницы...")
-                await self._setup_page()
-                await self._save_cookies()
-                
-                self.is_fully_initialized = True
-                print("✅ Браузер полностью инициализирован!")
-        except Exception as e:
-            print(f"❌ Ошибка инициализации браузера: {e}")
-            import traceback
-            traceback.print_exc()
+            browser_args = [
+                '--no-sandbox',
+                '--disable-setuid-sandbox',
+                '--disable-blink-features=AutomationControlled',
+                '--disable-dev-shm-usage',
+                '--window-size=1920,1080',
+            ]
             
-            # Очищаем состояние при ошибке
-            self.is_fully_initialized = False
             try:
-                await self.close_browser()
+                self.browser = await self.playwright.chromium.launch(
+                    headless=True,
+                    args=browser_args,
+                    channel='chrome'
+                )
+                print("✓ Chrome запущен")
             except:
-                pass
-            raise
-        finally:
-            self.initialization_in_progress = False
+                self.browser = await self.playwright.chromium.launch(
+                    headless=True,
+                    args=browser_args
+                )
+                print("✓ Chromium запущен")
+            
+            user_agent = self._get_random_user_agent()
+            
+            self.context = await self.browser.new_context(
+                viewport={'width': 1920, 'height': 1080},
+                locale='uk-UA',
+                timezone_id='Europe/Kiev',
+                user_agent=user_agent,
+                geolocation={'latitude': 50.4501, 'longitude': 30.5234},
+            )
+            
+            await self.context.add_init_script("""
+                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
+                window.navigator.chrome = { runtime: {} };
+                Object.defineProperty(navigator, 'languages', { get: () => ['uk-UA', 'uk'] });
+            """)
+            
+            self.page = await self.context.new_page()
+            await self._load_cookies()
+            await self._setup_page()
+            await self._save_cookies()
     
-async def _close_survey_if_present(self):
+        
+    
+    async def _close_survey_if_present(self):
         """Закрывает опрос если он появился - улучшенная версия"""
         try:
             # 1. Пробуем найти модальное окно по паттерну с любым номером
             # Используем JavaScript для поиска элемента с подходящим ID
             modal_found = await self.page.evaluate("""
                 () => {
-                    // Ищем все элементы с ID начинающим на modal-questionnaire-welcome-
+                    // Ищем все элементы с ID начинающимся на modal-questionnaire-welcome-
                     const modals = document.querySelectorAll('[id^="modal-questionnaire-welcome-"]');
                     for (const modal of modals) {
                         // Проверяем видимость модального окна
@@ -831,9 +753,11 @@ async def _close_survey_if_present(self):
             print(f"⚠ Ошибка при закрытии опроса: {e}")
             return False
 
+
     async def _wait_and_close_survey(self, timeout=3):
         """Ждет появления опроса и закрывает его"""
         try:
+            # Ждем немного и проверяем несколько раз
             for i in range(timeout):
                 if await self._close_survey_if_present():
                     return True
@@ -842,157 +766,100 @@ async def _close_survey_if_present(self):
         except:
             return False
 
-    async def _wait_for_autocomplete(self, list_id, timeout=20000):
-        """Ждет появления списка автокомплита"""
-        try:
-            # Сначала ждем появления самого контейнера списка
-            await self.page.wait_for_selector(f'#{list_id}', state='visible', timeout=timeout)
-            await asyncio.sleep(0.5)
-            
-            # Проверяем что в нем есть элементы
-            items = self.page.locator(f'#{list_id} > div')
-            count = await items.count()
-            
-            if count > 0:
-                print(f"✓ Список {list_id} содержит {count} элементов")
-                return True
-            else:
-                print(f"⚠ Список {list_id} пуст")
-                return False
-        except Exception as e:
-            print(f"⚠ Список {list_id} не появился: {e}")
-            return False
-    
-    async def _fill_form_with_js_fallback(self):
-        """Заполняет форму через JavaScript (fallback метод)"""
-        print("🔧 Использую JavaScript для заполнения формы...")
-        try:
-            await self.page.evaluate("""
-                () => {
-                    // Находим и заполняем поля
-                    const cityInput = document.querySelector('#city');
-                    const streetInput = document.querySelector('#street');
-                    const houseInput = document.querySelector('#house_num');
-                    
-                    if (cityInput) {
-                        cityInput.value = 'Книжичі';
-                        cityInput.dispatchEvent(new Event('input', { bubbles: true }));
-                        cityInput.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                    
-                    if (streetInput) {
-                        streetInput.value = 'Київська';
-                        streetInput.dispatchEvent(new Event('input', { bubbles: true }));
-                        streetInput.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                    
-                    if (houseInput) {
-                        houseInput.value = '168';
-                        houseInput.dispatchEvent(new Event('input', { bubbles: true }));
-                        houseInput.dispatchEvent(new Event('change', { bubbles: true }));
-                    }
-                }
-            """)
-            await asyncio.sleep(3)
-            print("✓ Форма заполнена через JavaScript")
-            return True
-        except Exception as e:
-            print(f"❌ Ошибка при заполнении через JavaScript: {e}")
-            return False
-    
+
     async def _setup_page(self):
-    """Настройка страницы - обновленная версия"""
-    print("Настройка страницы...")
-    await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='networkidle', timeout=60000)
-    await self._random_delay(3000, 5000)
-    
-    # Закрываем опрос сразу после загрузки
-    await self._wait_and_close_survey(timeout=3)
-    
-    try:
-        captcha_checkbox = self.page.locator('iframe[src*="checkbox"]')
-        if await captcha_checkbox.count() > 0:
-            print("⚠️ Обнаружена капча! Используйте веб-интерфейс.")
-            for i in range(300):
-                await asyncio.sleep(1)
-                # Проверяем опрос каждые 10 секунд во время ожидания капчи
-                if i % 10 == 0:
-                    await self._close_survey_if_present()
-                if await captcha_checkbox.count() == 0:
-                    print("✓ Капча пройдена!")
-                    await self._save_cookies()
-                    break
-    except:
-        pass
-    
-    await self._random_delay(1500, 2500)
-    
-    # Еще раз проверяем опрос перед началом работы
-    await self._close_survey_if_present()
-    
-    try:
-        close_btn = self.page.locator('button.m-attention__close')
-        if await close_btn.count() > 0:
-            await self._human_move_and_click(close_btn)
-    except:
-        pass
-    
-    # Остальной код заполнения формы остается без изменений...
-    city_input = self.page.locator('.discon-input-wrapper #city')
-    await city_input.wait_for(state='visible', timeout=10000)
-    await self._human_move_and_click(city_input)
-    await city_input.clear()
-    await self._human_type(city_input, 'кніж')
-    await self._random_delay(1800, 2500)
-    
-    city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
-    await city_option.wait_for(state='visible', timeout=10000)
-    await self._human_move_and_click(city_option)
-    await self._random_delay(1000, 1800)
-    
-    street_input = self.page.locator('.discon-input-wrapper #street')
-    await street_input.wait_for(state='visible', timeout=10000)
-    await self._human_move_and_click(street_input)
-    await street_input.clear()
-    await self._human_type(street_input, 'киї')
-    await self._random_delay(1800, 2500)
-    
-    street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
-    await street_option.wait_for(state='visible', timeout=10000)
-    await self._human_move_and_click(street_option)
-    await self._random_delay(1000, 1800)
-    
-    house_input = self.page.locator('input#house_num')
-    await house_input.wait_for(state='visible', timeout=10000)
-    await self._human_move_and_click(house_input)
-    await house_input.clear()
-    await self._human_type(house_input, '168')
-    await self._random_delay(1800, 2500)
-    
-    house_option = self.page.locator('#house_numautocomplete-list > div:first-child')
-    await house_option.wait_for(state='visible', timeout=10000)
-    await self._human_move_and_click(house_option)
-    await self._random_delay(2500, 3500)
-    
-    # Финальная проверка опроса
-    await self._close_survey_if_present()
-    
-    try:
-        update_elem = self.page.locator('span.update')
-        await update_elem.wait_for(state='visible', timeout=15000)
-        self.last_update_date = await update_elem.text_content()
-        self.last_update_date = self.last_update_date.strip()
-        print(f"✓ Дата обновления: {self.last_update_date}")
-    except:
-        self.last_update_date = "Невідомо"
-    
-    print("✅ Страница настроена!")
+        """Настройка страницы - обновленная версия"""
+        print("Настройка страницы...")
+        await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='networkidle', timeout=60000)
+        await self._random_delay(3000, 5000)
+        
+        # Закрываем опрос сразу после загрузки
+        await self._wait_and_close_survey(timeout=3)
+        
+        try:
+            captcha_checkbox = self.page.locator('iframe[src*="checkbox"]')
+            if await captcha_checkbox.count() > 0:
+                print("⚠️ Обнаружена капча! Используйте веб-интерфейс.")
+                for i in range(300):
+                    await asyncio.sleep(1)
+                    # Проверяем опрос каждые 10 секунд во время ожидания капчи
+                    if i % 10 == 0:
+                        await self._close_survey_if_present()
+                    if await captcha_checkbox.count() == 0:
+                        print("✓ Капча пройдена!")
+                        await self._save_cookies()
+                        break
+        except:
+            pass
+        
+        await self._random_delay(1500, 2500)
+        
+        # Еще раз проверяем опрос перед началом работы
+        await self._close_survey_if_present()
+        
+        try:
+            close_btn = self.page.locator('button.m-attention__close')
+            if await close_btn.count() > 0:
+                await self._human_move_and_click(close_btn)
+        except:
+            pass
+        
+        # Остальной код заполнения формы остается без изменений...
+        city_input = self.page.locator('.discon-input-wrapper #city')
+        await city_input.wait_for(state='visible', timeout=10000)
+        await self._human_move_and_click(city_input)
+        await city_input.clear()
+        await self._human_type(city_input, 'княж')
+        await self._random_delay(1800, 2500)
+        
+        city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
+        await city_option.wait_for(state='visible', timeout=10000)
+        await self._human_move_and_click(city_option)
+        await self._random_delay(1000, 1800)
+        
+        street_input = self.page.locator('.discon-input-wrapper #street')
+        await street_input.wait_for(state='visible', timeout=10000)
+        await self._human_move_and_click(street_input)
+        await street_input.clear()
+        await self._human_type(street_input, 'киї')
+        await self._random_delay(1800, 2500)
+        
+        street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
+        await street_option.wait_for(state='visible', timeout=10000)
+        await self._human_move_and_click(street_option)
+        await self._random_delay(1000, 1800)
+        
+        house_input = self.page.locator('input#house_num')
+        await house_input.wait_for(state='visible', timeout=10000)
+        await self._human_move_and_click(house_input)
+        await house_input.clear()
+        await self._human_type(house_input, '168')
+        await self._random_delay(1800, 2500)
+        
+        house_option = self.page.locator('#house_numautocomplete-list > div:first-child')
+        await house_option.wait_for(state='visible', timeout=10000)
+        await self._human_move_and_click(house_option)
+        await self._random_delay(2500, 3500)
+        
+        # Финальная проверка опроса
+        await self._close_survey_if_present()
+        
+        try:
+            update_elem = self.page.locator('span.update')
+            await update_elem.wait_for(state='visible', timeout=15000)
+            self.last_update_date = await update_elem.text_content()
+            self.last_update_date = self.last_update_date.strip()
+            print(f"✓ Дата обновления: {self.last_update_date}")
+        except:
+            self.last_update_date = "Невідомо"
+        
+        print("✅ Страница настроена!")
+
 
     async def check_for_update(self):
         """Проверяет изменилась ли дата - обновленная версия"""
         try:
-            await self.ensure_browser_ready()
-            
+            # Закрываем опрос ПЕРЕД проверкой
             await self._close_survey_if_present()
             
             if random.random() < 0.3:
@@ -1006,7 +873,7 @@ async def _close_survey_if_present(self):
             print(f"Текущая дата: {current_date}, Последняя: {self.last_update_date}")
             
             if current_date != self.last_update_date:
-                print("📢 ОБНОВЛЕНИЕ ОБНАРУЖЕНО!")
+                print("🔔 ОБНОВЛЕНИЕ ОБНАРУЖЕНО!")
                 self.last_update_date = current_date
                 await self._save_cookies()
                 return True
@@ -1014,6 +881,8 @@ async def _close_survey_if_present(self):
         except Exception as e:
             print(f"Ошибка при проверке: {e}")
             return False
+
+
     
     def crop_screenshot(self, screenshot_bytes, top_crop=300, bottom_crop=400, left_crop=0, right_crop=0):
         """Обрезает скриншот"""
@@ -1040,8 +909,6 @@ async def _close_survey_if_present(self):
     async def make_screenshots(self):
         """Делает скриншоты - обновленная версия"""
         try:
-            await self.ensure_browser_ready()
-            
             # Агрессивно закрываем все модальные окна
             await self._close_survey_if_present()
             await asyncio.sleep(0.5)
@@ -1088,6 +955,7 @@ async def _close_survey_if_present(self):
                 await first_date.click()
                 await asyncio.sleep(2)
                 
+                # Закрываем опрос после возврата на первый график
                 await self._close_survey_if_present()
                 
                 print(f"✓ Вернулся на первый график")
@@ -1110,28 +978,18 @@ async def _close_survey_if_present(self):
             import traceback
             traceback.print_exc()
             raise
+       
 
     async def close_browser(self):
         """Закрытие браузера"""
-        try:
-            if self.page:
-                await self.page.close()
-            if self.context:
-                await self.context.close()
-            if self.browser:
-                await self.browser.close()
-            if self.playwright:
-                await self.playwright.stop()
-            
-            self.page = None
-            self.context = None
-            self.browser = None
-            self.playwright = None
-            self.is_fully_initialized = False
-            
-            print("✓ Браузер закрыт")
-        except Exception as e:
-            print(f"⚠ Ошибка при закрытии браузера: {e}")
+        if self.page:
+            await self.page.close()
+        if self.context:
+            await self.context.close()
+        if self.browser:
+            await self.browser.close()
+        if self.playwright:
+            await self.playwright.stop()
 
 checker = DTEKChecker()
 
@@ -1167,51 +1025,23 @@ async def on_ready():
     print(f'✓ Интервал проверки: каждые 5 минут')
     print(f'🌐 Веб-интерфейс для прохождения капчи запущен на порту {PORT}')
     print(f'🥷 STEALTH MODE активирован')
-    print(f'🔄 АВТОВОССТАНОВЛЕНИЕ браузера активно')
-    
     await init_db_pool()
     await start_web_server()
     
-    # Автоматически инициализируем браузер при старте
-    print("🚀 Автоматическая инициализация браузера...")
-    try:
-        await checker.init_browser()
-        print("✅ Браузер успешно инициализирован!")
-    except Exception as e:
-        print(f"⚠️ Ошибка при начальной инициализации: {e}")
-        print("💡 Браузер будет автоматически инициализирован при первой проверке")
-    
-    print(f"🌐 URL веб-интерфейса: http://localhost:{PORT}")
+    # НЕ инициализируем браузер автоматически - пользователь сделает это через веб-интерфейс
+    print("💡 Откройте веб-интерфейс и нажмите 'Инициализировать браузер'")
+    print(f"🌐 URL: http://localhost:{PORT}")
     print("🎉 Бот готов к работе!")
     
     check_schedule.start()
-    browser_health_check.start()
-
-@tasks.loop(minutes=2)
-async def browser_health_check():
-    """Периодическая проверка состояния браузера каждые 2 минуты"""
-    try:
-        if not await checker.is_browser_alive():
-            print("⚠️ Браузер не отвечает, выполняю автоматическое восстановление...")
-            await checker.ensure_browser_ready()
-    except Exception as e:
-        print(f"❌ Ошибка в browser_health_check: {e}")
-
-@browser_health_check.before_loop
-async def before_browser_health_check():
-    await bot.wait_until_ready()
-    await asyncio.sleep(120)
 
 @tasks.loop(minutes=5)
 async def check_schedule():
     """Периодическая проверка каждые 5 минут"""
     channel = None
     try:
-        # Убеждаемся, что браузер готов
-        await checker.ensure_browser_ready()
-        
         if not checker.browser or not checker.page:
-            print("⚠️ Браузер не инициализирован после ensure_browser_ready")
+            print("⏭️ Браузер не инициализирован, пропускаю проверку")
             return
         
         channel = bot.get_channel(CHANNEL_ID)
@@ -1249,7 +1079,7 @@ async def check_schedule():
         
         embed.add_field(
             name="✅ Статус",
-            value="**📢 ІНФОРМАЦІЯ ОНОВИЛАСЬ!**",
+            value="**🔔 ІНФОРМАЦІЯ ОНОВИЛАСЬ!**",
             inline=False
         )
         embed.set_footer(text="Нова інформація • Автоматична перевірка")
@@ -1320,11 +1150,13 @@ async def before_check_schedule():
 @bot.command(name='check')
 async def manual_check(ctx):
     """Ручная проверка по команде !check"""
+    if not checker.browser or not checker.page:
+        await ctx.send("✘ Браузер не ініціалізовано. Відкрийте веб-інтерфейс та натисніть 'Ініціалізувати браузер'")
+        return
+    
     await ctx.send("⏳ Починаю перевірку графіка відключень...")
     
     try:
-        await checker.ensure_browser_ready()
-        
         result = await asyncio.wait_for(checker.make_screenshots(), timeout=180)
         await save_check(result['update_date'])
         
@@ -1425,12 +1257,6 @@ async def bot_info(ctx):
         )
     
     embed.add_field(
-        name="🔄 Автовосстановление",
-        value="✅ Активно (проверка каждые 2 минуты)",
-        inline=False
-    )
-    
-    embed.add_field(
         name="🌐 Веб-інтерфейс",
         value=f"Порт: {PORT}\nДля проходження капчі",
         inline=False
@@ -1448,7 +1274,7 @@ async def bot_info(ctx):
 async def bot_status(ctx):
     """Детальный статус бота"""
     embed = discord.Embed(
-        title="📊 Детальний статус бота",
+        title="🔍 Детальний статус бота",
         color=discord.Color.purple(),
         timestamp=datetime.now()
     )
@@ -1456,36 +1282,19 @@ async def bot_status(ctx):
     playwright_status = "✅ Запущен" if checker.playwright else "❌ Не запущен"
     browser_status = "✅ Открыт" if checker.browser else "❌ Закрыт"
     page_status = "✅ Загружена" if checker.page else "❌ Не загружена"
-    init_status = "✅ Да" if checker.is_fully_initialized else "❌ Нет"
     
     embed.add_field(name="Playwright", value=playwright_status, inline=True)
     embed.add_field(name="Browser", value=browser_status, inline=True)
     embed.add_field(name="Page", value=page_status, inline=True)
-    embed.add_field(name="Полная инициализация", value=init_status, inline=True)
     
     db_status = "✅ Підключено" if db_pool else "❌ Не підключено"
     embed.add_field(name="База даних", value=db_status, inline=False)
     
     task_status = "✅ Запущено" if check_schedule.is_running() else "❌ Зупинено"
-    embed.add_field(name="Автоматична перевірка", value=task_status, inline=True)
-    
-    health_status = "✅ Запущено" if browser_health_check.is_running() else "❌ Зупинено"
-    embed.add_field(name="Моніторинг браузера", value=health_status, inline=True)
-    
-    # Проверяем, жив ли браузер прямо сейчас
-    is_alive = await checker.is_browser_alive()
-    alive_status = "✅ Відповідає" if is_alive else "❌ Не відповідає"
-    embed.add_field(name="Відповідь браузера", value=alive_status, inline=True)
+    embed.add_field(name="Автоматична перевірка", value=task_status, inline=False)
     
     if checker.last_update_date:
         embed.add_field(name="📅 Дата на сайті", value=f"`{checker.last_update_date}`", inline=False)
-    
-    last_check_time = (datetime.now() - checker.last_browser_check).total_seconds()
-    embed.add_field(
-        name="🕐 Остання перевірка здоров'я",
-        value=f"{int(last_check_time)} секунд тому",
-        inline=False
-    )
     
     await ctx.send(embed=embed)
 
@@ -1495,7 +1304,6 @@ async def stop_bot(ctx):
     """Остановка бота"""
     await ctx.send("🛑 Зупиняю бота...")
     check_schedule.cancel()
-    browser_health_check.cancel()
     try:
         await checker._save_cookies()
         await checker.close_browser()
@@ -1504,24 +1312,11 @@ async def stop_bot(ctx):
     await close_db_pool()
     await bot.close()
 
-@bot.command(name='restart')
-@commands.has_permissions(administrator=True)
-async def restart_browser(ctx):
-    """Принудительный рестарт браузера"""
-    await ctx.send("🔄 Перезапускаю браузер...")
-    try:
-        await checker.close_browser()
-        await checker.init_browser()
-        await ctx.send("✅ Браузер успішно перезапущено!")
-    except Exception as e:
-        await ctx.send(f"❌ Помилка: {str(e)}")
-
 if __name__ == '__main__':
     try:
-        print("🤖 Запуск Discord бота DTEK с автовосстановлением...")
+        print("🤖 Запуск Discord бота DTEK с веб-интерфейсом...")
         print(f"📅 Дата: {datetime.now()}")
         print("🌐 Веб-интерфейс для управления браузером включен")
-        print("🔄 Система автоматического восстановления активна")
         bot.run(DISCORD_TOKEN)
     except KeyboardInterrupt:
         print("\n🛑 Остановка бота...")
