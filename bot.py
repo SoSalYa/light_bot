@@ -761,38 +761,75 @@ class DTEKChecker:
             self.initialization_in_progress = False
     
     async def _close_survey_if_present(self):
-        """Закрывает опрос если он появился - ИСПРАВЛЕННАЯ версия"""
-        try:
-            # Ищем видимое модальное окно с помощью JavaScript
-            modal_visible = await self.page.evaluate("""
-                () => {
-                    // Ищем все модальные окна опросов
-                    const modals = document.querySelectorAll('[id^="modal-questionnaire"]');
-                    for (const modal of modals) {
-                        const style = window.getComputedStyle(modal);
-                        if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
-                            // Находим кнопку закрытия внутри этого модального окна
-                            const closeBtn = modal.querySelector('.modal__close');
-                            if (closeBtn) {
-                                closeBtn.click();
-                                return true;
-                            }
-                        }
+    """Закрывает опрос если он появился - улучшенная версия"""
+    try:
+        # 1. Пробуем найти модальное окно по паттерну с любым номером
+        # Используем JavaScript для поиска элемента с подходящим ID
+        modal_found = await self.page.evaluate("""
+            () => {
+                // Ищем все элементы с ID начинающим на modal-questionnaire-welcome-
+                const modals = document.querySelectorAll('[id^="modal-questionnaire-welcome-"]');
+                for (const modal of modals) {
+                    // Проверяем видимость модального окна
+                    const style = window.getComputedStyle(modal);
+                    if (style.display !== 'none' && style.visibility !== 'hidden') {
+                        return modal.id;
                     }
-                    return false;
                 }
-            """)
+                return null;
+            }
+        """)
+        
+        if modal_found:
+            print(f"✓ Найдено модальное окно опроса: {modal_found}")
             
-            if modal_visible:
+            # Пробуем закрыть через специфичный селектор
+            close_selector = f"#{modal_found} .modal__close"
+            close_btn = self.page.locator(close_selector)
+            
+            if await close_btn.count() > 0:
+                await close_btn.click()
                 await asyncio.sleep(1)
-                print("✓ Опрос закрыт")
+                print(f"✓ Опрос закрыт через селектор: {close_selector}")
                 return True
-            
-            return False
-                    
-        except Exception as e:
-            print(f"⚠ Ошибка при закрытии опроса: {e}")
-            return False
+        
+        # 2. Дополнительная проверка - ищем кнопку закрытия по общим селекторам
+        generic_selectors = [
+            '.modal__close',
+            'button.modal__close',
+            '.modal .modal__close',
+            'button[aria-label="Close"]',
+            '.questionnaire .modal__close'
+        ]
+        
+        for selector in generic_selectors:
+            close_btn = self.page.locator(selector)
+            if await close_btn.count() > 0 and await close_btn.is_visible():
+                await close_btn.click()
+                await asyncio.sleep(1)
+                print(f"✓ Опрос закрыт через общий селектор: {selector}")
+                return True
+        
+        # 3. Альтернативный метод - поиск через текст кнопки
+        try:
+            # Ищем кнопку с крестиком или текстом закрытия
+            close_by_text = self.page.locator('button:has-text("×"), button:has-text("✕")')
+            if await close_by_text.count() > 0:
+                first_close = close_by_text.first
+                if await first_close.is_visible():
+                    await first_close.click()
+                    await asyncio.sleep(1)
+                    print("✓ Опрос закрыт через поиск по символу закрытия")
+                    return True
+        except:
+            pass
+        
+        print("⚪ Модальное окно опроса не найдено")
+        return False
+                
+    except Exception as e:
+        print(f"⚠ Ошибка при закрытии опроса: {e}")
+        return False
 
     async def _wait_and_close_survey(self, timeout=3):
         """Ждет появления опроса и закрывает его"""
@@ -864,178 +901,92 @@ class DTEKChecker:
             return False
     
     async def _setup_page(self):
-        """Настройка страницы - УЛУЧШЕННАЯ версия с пропуском если есть куки"""
-        print("Настройка страницы...")
-        await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='networkidle', timeout=60000)
-        await self._random_delay(3000, 5000)
-        
-        # Закрываем опрос сразу после загрузки
-        await self._wait_and_close_survey(timeout=3)
-        
-        # Проверка капчи
-        try:
-            captcha_checkbox = self.page.locator('iframe[src*="checkbox"]')
-            if await captcha_checkbox.count() > 0:
-                print("⚠️ Обнаружена капча! Используйте веб-интерфейс.")
-                for i in range(300):
-                    await asyncio.sleep(1)
-                    if i % 10 == 0:
-                        await self._close_survey_if_present()
-                    if await captcha_checkbox.count() == 0:
-                        print("✓ Капча пройдена!")
-                        await self._save_cookies()
-                        break
-        except:
-            pass
-        
-        await self._random_delay(1500, 2500)
-        await self._close_survey_if_present()
-        
-        # Проверяем, может форма уже заполнена (есть куки)
-        try:
-            update_elem = self.page.locator('span.update')
-            if await update_elem.count() > 0 and await update_elem.is_visible():
-                self.last_update_date = await update_elem.text_content()
-                self.last_update_date = self.last_update_date.strip()
-                print(f"✓ Форма уже заполнена, дата: {self.last_update_date}")
-                print("✅ Страница настроена (пропущено заполнение формы)!")
-                return
-        except:
-            pass
-        
-        print("📝 Начинаю заполнение формы...")
-        
-        # Закрываем рекламу
-        try:
-            close_btn = self.page.locator('button.m-attention__close')
-            if await close_btn.count() > 0:
-                await self._human_move_and_click(close_btn)
-        except:
-            pass
-        
-        # Счетчик успешных заполнений
-        form_filled_successfully = False
-        
-        try:
-            # Город
-            print("Заполняю город...")
-            city_input = self.page.locator('.discon-input-wrapper #city')
-            await city_input.wait_for(state='visible', timeout=15000)
-            await self._human_move_and_click(city_input)
-            await city_input.clear()
-            await asyncio.sleep(0.5)
-            await self._human_type(city_input, 'кніж')
-            
-            # Ждем появления списка автокомплита
-            print("Ожидаю список городов...")
-            if await self._wait_for_autocomplete('cityautocomplete-list', timeout=20000):
-                try:
-                    # Пробуем кликнуть на второй элемент (первый обычно заголовок)
-                    city_option = self.page.locator('#cityautocomplete-list > div').nth(1)
-                    await city_option.wait_for(state='visible', timeout=5000)
-                    await self._human_move_and_click(city_option)
-                    print("✓ Город выбран")
-                except:
-                    print("⚠ Пробую первый элемент списка городов...")
-                    city_option = self.page.locator('#cityautocomplete-list > div').first
-                    await city_option.click()
-            else:
-                print("⚠ Автокомплит города не сработал, нажимаю Enter...")
-                await city_input.press('Enter')
-            
-            await self._random_delay(1000, 1800)
-            
-            # Улица
-            print("Заполняю улицу...")
-            street_input = self.page.locator('.discon-input-wrapper #street')
-            await street_input.wait_for(state='visible', timeout=15000)
-            await self._human_move_and_click(street_input)
-            await street_input.clear()
-            await asyncio.sleep(0.5)
-            await self._human_type(street_input, 'київ')
-            
-            # Ждем появления списка улиц
-            print("Ожидаю список улиц...")
-            if await self._wait_for_autocomplete('streetautocomplete-list', timeout=20000):
-                try:
-                    street_option = self.page.locator('#streetautocomplete-list > div').nth(1)
-                    await street_option.wait_for(state='visible', timeout=5000)
-                    await self._human_move_and_click(street_option)
-                    print("✓ Улица выбрана")
-                except:
-                    print("⚠ Пробую первый элемент списка улиц...")
-                    street_option = self.page.locator('#streetautocomplete-list > div').first
-                    await street_option.click()
-            else:
-                print("⚠ Автокомплит улицы не сработал, нажимаю Enter...")
-                await street_input.press('Enter')
-            
-            await self._random_delay(1000, 1800)
-            
-            # Дом
-            print("Заполняю номер дома...")
-            house_input = self.page.locator('input#house_num')
-            await house_input.wait_for(state='visible', timeout=15000)
-            await self._human_move_and_click(house_input)
-            await house_input.clear()
-            await asyncio.sleep(0.5)
-            await self._human_type(house_input, '168')
-            
-            # Ждем появления списка домов
-            print("Ожидаю список домов...")
-            if await self._wait_for_autocomplete('house_numautocomplete-list', timeout=20000):
-                try:
-                    house_option = self.page.locator('#house_numautocomplete-list > div').first
-                    await house_option.wait_for(state='visible', timeout=5000)
-                    await self._human_move_and_click(house_option)
-                    print("✓ Дом выбран")
-                except:
-                    print("⚠ Пробую кликнуть любой элемент списка домов...")
-                    await self.page.locator('#house_numautocomplete-list').click()
-            else:
-                print("⚠ Автокомплит дома не сработал, нажимаю Enter...")
-                await house_input.press('Enter')
-            
-            await self._random_delay(2500, 3500)
-            form_filled_successfully = True
-            
-        except Exception as e:
-            print(f"⚠ Ошибка при заполнении формы через UI: {e}")
-            print("🔄 Пробую запасной метод через JavaScript...")
-            form_filled_successfully = await self._fill_form_with_js_fallback()
-        
-        if not form_filled_successfully:
-            print("⚠️ Форма не была заполнена, но продолжаю...")
-        
-        # Финальная проверка опроса
-        await self._close_survey_if_present()
-        
-        # Получаем дату обновления
-        try:
-            update_elem = self.page.locator('span.update')
-            await update_elem.wait_for(state='visible', timeout=15000)
-            self.last_update_date = await update_elem.text_content()
-            self.last_update_date = self.last_update_date.strip()
-            print(f"✓ Дата обновления: {self.last_update_date}")
-        except Exception as e:
-            self.last_update_date = "Невідомо"
-            print(f"⚠ Не удалось получить дату обновления: {e}")
-            # Если не получилось получить дату - возможно форма не заполнена
-            # Пробуем еще раз через JavaScript
-            if not form_filled_successfully:
-                print("🔄 Последняя попытка заполнения через JavaScript...")
-                await self._fill_form_with_js_fallback()
-                await asyncio.sleep(3)
-                try:
-                    update_elem = self.page.locator('span.update')
-                    await update_elem.wait_for(state='visible', timeout=10000)
-                    self.last_update_date = await update_elem.text_content()
-                    self.last_update_date = self.last_update_date.strip()
-                    print(f"✓ Дата обновления (после retry): {self.last_update_date}")
-                except:
-                    print("❌ Не удалось получить дату даже после повторной попытки")
-        
-        print("✅ Страница настроена!")
+    """Настройка страницы - обновленная версия"""
+    print("Настройка страницы...")
+    await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='networkidle', timeout=60000)
+    await self._random_delay(3000, 5000)
+    
+    # Закрываем опрос сразу после загрузки
+    await self._wait_and_close_survey(timeout=3)
+    
+    try:
+        captcha_checkbox = self.page.locator('iframe[src*="checkbox"]')
+        if await captcha_checkbox.count() > 0:
+            print("⚠️ Обнаружена капча! Используйте веб-интерфейс.")
+            for i in range(300):
+                await asyncio.sleep(1)
+                # Проверяем опрос каждые 10 секунд во время ожидания капчи
+                if i % 10 == 0:
+                    await self._close_survey_if_present()
+                if await captcha_checkbox.count() == 0:
+                    print("✓ Капча пройдена!")
+                    await self._save_cookies()
+                    break
+    except:
+        pass
+    
+    await self._random_delay(1500, 2500)
+    
+    # Еще раз проверяем опрос перед началом работы
+    await self._close_survey_if_present()
+    
+    try:
+        close_btn = self.page.locator('button.m-attention__close')
+        if await close_btn.count() > 0:
+            await self._human_move_and_click(close_btn)
+    except:
+        pass
+    
+    # Остальной код заполнения формы остается без изменений...
+    city_input = self.page.locator('.discon-input-wrapper #city')
+    await city_input.wait_for(state='visible', timeout=10000)
+    await self._human_move_and_click(city_input)
+    await city_input.clear()
+    await self._human_type(city_input, 'кніж')
+    await self._random_delay(1800, 2500)
+    
+    city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
+    await city_option.wait_for(state='visible', timeout=10000)
+    await self._human_move_and_click(city_option)
+    await self._random_delay(1000, 1800)
+    
+    street_input = self.page.locator('.discon-input-wrapper #street')
+    await street_input.wait_for(state='visible', timeout=10000)
+    await self._human_move_and_click(street_input)
+    await street_input.clear()
+    await self._human_type(street_input, 'киї')
+    await self._random_delay(1800, 2500)
+    
+    street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
+    await street_option.wait_for(state='visible', timeout=10000)
+    await self._human_move_and_click(street_option)
+    await self._random_delay(1000, 1800)
+    
+    house_input = self.page.locator('input#house_num')
+    await house_input.wait_for(state='visible', timeout=10000)
+    await self._human_move_and_click(house_input)
+    await house_input.clear()
+    await self._human_type(house_input, '168')
+    await self._random_delay(1800, 2500)
+    
+    house_option = self.page.locator('#house_numautocomplete-list > div:first-child')
+    await house_option.wait_for(state='visible', timeout=10000)
+    await self._human_move_and_click(house_option)
+    await self._random_delay(2500, 3500)
+    
+    # Финальная проверка опроса
+    await self._close_survey_if_present()
+    
+    try:
+        update_elem = self.page.locator('span.update')
+        await update_elem.wait_for(state='visible', timeout=15000)
+        self.last_update_date = await update_elem.text_content()
+        self.last_update_date = self.last_update_date.strip()
+        print(f"✓ Дата обновления: {self.last_update_date}")
+    except:
+        self.last_update_date = "Невідомо"
+    
+    print("✅ Страница настроена!")
 
     async def check_for_update(self):
         """Проверяет изменилась ли дата - обновленная версия"""
