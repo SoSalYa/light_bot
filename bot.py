@@ -755,15 +755,28 @@ class DTEKChecker:
         print("✅ Страница настроена!")
     
     async def _close_survey_if_present(self):
-        """Закрывает опрос если он появился"""
-        try:
-            modal = self.page.locator('#modal-questionnaire-welcome-18 .modal__container')
-            if await modal.is_visible():
-                close_btn = self.page.locator('#modal-questionnaire-welcome-7 .modal__close')
+    """Закрывает опрос если он появился"""
+    try:
+        # Проверяем несколько возможных вариантов модального окна
+        selectors = [
+            '#modal-questionnaire-welcome-7 .modal__close',
+            '#modal-questionnaire-welcome-18 .modal__close',
+            '.modal__close',  # общий селектор на случай изменения ID
+            'button[aria-label="Close"]'
+        ]
+        
+        for selector in selectors:
+            close_btn = self.page.locator(selector)
+            if await close_btn.count() > 0 and await close_btn.is_visible():
+                print(f"✓ Найдено окно опроса, закрываю ({selector})...")
                 await close_btn.click()
-                await asyncio.sleep(0.5)
-        except:
-            pass
+                await asyncio.sleep(1)
+                print("✓ Опрос закрыт")
+                return True
+                
+    except Exception as e:
+        print(f"⚠ Ошибка при закрытии опроса: {e}")
+    return False
     
     async def check_for_update(self):
         """Проверяет изменилась ли дата"""
