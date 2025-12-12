@@ -538,7 +538,7 @@ async def handle_clear_cookies(request):
 
 async def handle_status(request):
     """API: Получить статус бота"""
-    browser_status = "✅ Открыт" if checker.browser else "❌ Закрыт"
+    browser_status = "✅ Открыт" if checker.browser and checker.page else "❌ Закрыт"
     cookies_status = "✅ Есть" if os.path.exists(checker.cookies_file) else "❌ Нет"
     
     return web.json_response({
@@ -577,6 +577,7 @@ class DTEKChecker:
         self.cookies_file = 'dtek_cookies.json'
         self.initialization_in_progress = False
         self.last_browser_check = datetime.now()
+        self.is_fully_initialized = False  # НОВЫЙ флаг для отслеживания полной инициализации
     
     def _get_random_user_agent(self):
         user_agents = [
@@ -648,7 +649,7 @@ class DTEKChecker:
                 return False
             
             # Пробуем выполнить простую операцию
-            await self.page.evaluate('() => true')
+            await asyncio.wait_for(self.page.evaluate('() => true'), timeout=5)
             return True
         except Exception as e:
             print(f"⚠ Браузер не отвечает: {e}")
@@ -665,7 +666,7 @@ class DTEKChecker:
         # Проверяем состояние браузера каждые 30 секунд
         now = datetime.now()
         if (now - self.last_browser_check).total_seconds() < 30:
-            if self.browser and self.page:
+            if self.browser and self.page and self.is_fully_initialized:
                 return
         
         self.last_browser_check = now
@@ -686,8 +687,11 @@ class DTEKChecker:
             return
         
         self.initialization_in_progress = True
+        self.is_fully_initialized = False
         
         try:
+            print("🚀 Запуск браузера...")
+            
             if not self.playwright:
                 self.playwright = await async_playwright().start()
                 
@@ -731,73 +735,55 @@ class DTEKChecker:
                 
                 self.page = await self.context.new_page()
                 await self._load_cookies()
+                
+                print("✓ Браузер создан, начинаем настройку страницы...")
                 await self._setup_page()
                 await self._save_cookies()
                 
+                self.is_fully_initialized = True
                 print("✅ Браузер полностью инициализирован!")
         except Exception as e:
             print(f"❌ Ошибка инициализации браузера: {e}")
             import traceback
             traceback.print_exc()
+            
+            # Очищаем состояние при ошибке
+            self.is_fully_initialized = False
+            try:
+                await self.close_browser()
+            except:
+                pass
             raise
         finally:
             self.initialization_in_progress = False
     
     async def _close_survey_if_present(self):
-        """Закрывает опрос если он появился - улучшенная версия"""
+        """Закрывает опрос если он появился - ИСПРАВЛЕННАЯ версия"""
         try:
-            modal_found = await self.page.evaluate("""
+            # Ищем видимое модальное окно с помощью JavaScript
+            modal_visible = await self.page.evaluate("""
                 () => {
-                    const modals = document.querySelectorAll('[id^="modal-questionnaire-welcome-"]');
+                    // Ищем все модальные окна опросов
+                    const modals = document.querySelectorAll('[id^="modal-questionnaire"]');
                     for (const modal of modals) {
                         const style = window.getComputedStyle(modal);
-                        if (style.display !== 'none' && style.visibility !== 'hidden') {
-                            return modal.id;
+                        if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+                            // Находим кнопку закрытия внутри этого модального окна
+                            const closeBtn = modal.querySelector('.modal__close');
+                            if (closeBtn) {
+                                closeBtn.click();
+                                return true;
+                            }
                         }
                     }
-                    return null;
+                    return false;
                 }
             """)
             
-            if modal_found:
-                print(f"✓ Найдено модальное окно опроса: {modal_found}")
-                
-                close_selector = f"#{modal_found} .modal__close"
-                close_btn = self.page.locator(close_selector)
-                
-                if await close_btn.count() > 0:
-                    await close_btn.click()
-                    await asyncio.sleep(1)
-                    print(f"✓ Опрос закрыт через селектор: {close_selector}")
-                    return True
-            
-            generic_selectors = [
-                '.modal__close',
-                'button.modal__close',
-                '.modal .modal__close',
-                'button[aria-label="Close"]',
-                '.questionnaire .modal__close'
-            ]
-            
-            for selector in generic_selectors:
-                close_btn = self.page.locator(selector)
-                if await close_btn.count() > 0 and await close_btn.is_visible():
-                    await close_btn.click()
-                    await asyncio.sleep(1)
-                    print(f"✓ Опрос закрыт через общий селектор: {selector}")
-                    return True
-            
-            try:
-                close_by_text = self.page.locator('button:has-text("×"), button:has-text("✕")')
-                if await close_by_text.count() > 0:
-                    first_close = close_by_text.first
-                    if await first_close.is_visible():
-                        await first_close.click()
-                        await asyncio.sleep(1)
-                        print("✓ Опрос закрыт через поиск по символу закрытия")
-                        return True
-            except:
-                pass
+            if modal_visible:
+                await asyncio.sleep(1)
+                print("✓ Опрос закрыт")
+                return True
             
             return False
                     
@@ -817,13 +803,15 @@ class DTEKChecker:
             return False
 
     async def _setup_page(self):
-        """Настройка страницы - обновленная версия"""
+        """Настройка страницы - УЛУЧШЕННАЯ версия"""
         print("Настройка страницы...")
         await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='networkidle', timeout=60000)
         await self._random_delay(3000, 5000)
         
+        # Закрываем опрос сразу после загрузки
         await self._wait_and_close_survey(timeout=3)
         
+        # Проверка капчи
         try:
             captcha_checkbox = self.page.locator('iframe[src*="checkbox"]')
             if await captcha_checkbox.count() > 0:
@@ -842,6 +830,7 @@ class DTEKChecker:
         await self._random_delay(1500, 2500)
         await self._close_survey_if_present()
         
+        # Закрываем рекламу
         try:
             close_btn = self.page.locator('button.m-attention__close')
             if await close_btn.count() > 0:
@@ -849,44 +838,68 @@ class DTEKChecker:
         except:
             pass
         
+        # Город
+        print("Заполняю город...")
         city_input = self.page.locator('.discon-input-wrapper #city')
-        await city_input.wait_for(state='visible', timeout=10000)
+        await city_input.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(city_input)
         await city_input.clear()
-        await self._human_type(city_input, 'кнїж')
+        await self._human_type(city_input, 'кніж')
         await self._random_delay(1800, 2500)
         
-        city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
-        await city_option.wait_for(state='visible', timeout=10000)
-        await self._human_move_and_click(city_option)
+        # Ждем список городов с более длинным таймаутом и проверкой
+        city_option = self.page.locator('#cityautocomplete-list > div').nth(1)
+        try:
+            await city_option.wait_for(state='visible', timeout=15000)
+            await self._human_move_and_click(city_option)
+        except:
+            # Пробуем альтернативный селектор
+            print("⚠ Пробую альтернативный селектор города...")
+            city_option_alt = self.page.locator('#cityautocomplete-list div').first
+            await city_option_alt.wait_for(state='visible', timeout=15000)
+            await self._human_move_and_click(city_option_alt)
+        
         await self._random_delay(1000, 1800)
         
+        # Улица
+        print("Заполняю улицу...")
         street_input = self.page.locator('.discon-input-wrapper #street')
-        await street_input.wait_for(state='visible', timeout=10000)
+        await street_input.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(street_input)
         await street_input.clear()
         await self._human_type(street_input, 'київ')
         await self._random_delay(1800, 2500)
         
-        street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
-        await street_option.wait_for(state='visible', timeout=10000)
-        await self._human_move_and_click(street_option)
+        street_option = self.page.locator('#streetautocomplete-list > div').nth(1)
+        try:
+            await street_option.wait_for(state='visible', timeout=15000)
+            await self._human_move_and_click(street_option)
+        except:
+            print("⚠ Пробую альтернативный селектор улицы...")
+            street_option_alt = self.page.locator('#streetautocomplete-list div').first
+            await street_option_alt.wait_for(state='visible', timeout=15000)
+            await self._human_move_and_click(street_option_alt)
+        
         await self._random_delay(1000, 1800)
         
+        # Дом
+        print("Заполняю номер дома...")
         house_input = self.page.locator('input#house_num')
-        await house_input.wait_for(state='visible', timeout=10000)
+        await house_input.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(house_input)
         await house_input.clear()
         await self._human_type(house_input, '168')
         await self._random_delay(1800, 2500)
         
-        house_option = self.page.locator('#house_numautocomplete-list > div:first-child')
-        await house_option.wait_for(state='visible', timeout=10000)
+        house_option = self.page.locator('#house_numautocomplete-list > div').first
+        await house_option.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(house_option)
         await self._random_delay(2500, 3500)
         
+        # Финальная проверка опроса
         await self._close_survey_if_present()
         
+        # Получаем дату обновления
         try:
             update_elem = self.page.locator('span.update')
             await update_elem.wait_for(state='visible', timeout=15000)
@@ -916,7 +929,7 @@ class DTEKChecker:
             print(f"Текущая дата: {current_date}, Последняя: {self.last_update_date}")
             
             if current_date != self.last_update_date:
-                print("🔔 ОБНОВЛЕНИЕ ОБНАРУЖЕНО!")
+                print("📢 ОБНОВЛЕНИЕ ОБНАРУЖЕНО!")
                 self.last_update_date = current_date
                 await self._save_cookies()
                 return True
@@ -952,6 +965,7 @@ class DTEKChecker:
         try:
             await self.ensure_browser_ready()
             
+            # Агрессивно закрываем все модальные окна
             await self._close_survey_if_present()
             await asyncio.sleep(0.5)
             await self._close_survey_if_present()
@@ -979,6 +993,7 @@ class DTEKChecker:
                 print("✓ Кликнул на второй график, жду загрузки...")
                 await asyncio.sleep(3)
                 
+                # Закрываем опрос который мог появиться после переключения
                 await self._close_survey_if_present()
                 await asyncio.sleep(1)
                 
@@ -1035,6 +1050,7 @@ class DTEKChecker:
             self.context = None
             self.browser = None
             self.playwright = None
+            self.is_fully_initialized = False
             
             print("✓ Браузер закрыт")
         except Exception as e:
@@ -1092,7 +1108,7 @@ async def on_ready():
     print("🎉 Бот готов к работе!")
     
     check_schedule.start()
-    browser_health_check.start()  # Запускаем мониторинг здоровья браузера
+    browser_health_check.start()
 
 @tasks.loop(minutes=2)
 async def browser_health_check():
@@ -1107,7 +1123,6 @@ async def browser_health_check():
 @browser_health_check.before_loop
 async def before_browser_health_check():
     await bot.wait_until_ready()
-    # Ждем немного после старта, чтобы не мешать основной инициализации
     await asyncio.sleep(120)
 
 @tasks.loop(minutes=5)
@@ -1157,7 +1172,7 @@ async def check_schedule():
         
         embed.add_field(
             name="✅ Статус",
-            value="**🔔 ІНФОРМАЦІЯ ОНОВИЛАСЬ!**",
+            value="**📢 ІНФОРМАЦІЯ ОНОВИЛАСЬ!**",
             inline=False
         )
         embed.set_footer(text="Нова інформація • Автоматична перевірка")
@@ -1364,10 +1379,12 @@ async def bot_status(ctx):
     playwright_status = "✅ Запущен" if checker.playwright else "❌ Не запущен"
     browser_status = "✅ Открыт" if checker.browser else "❌ Закрыт"
     page_status = "✅ Загружена" if checker.page else "❌ Не загружена"
+    init_status = "✅ Да" if checker.is_fully_initialized else "❌ Нет"
     
     embed.add_field(name="Playwright", value=playwright_status, inline=True)
     embed.add_field(name="Browser", value=browser_status, inline=True)
     embed.add_field(name="Page", value=page_status, inline=True)
+    embed.add_field(name="Полная инициализация", value=init_status, inline=True)
     
     db_status = "✅ Підключено" if db_pool else "❌ Не підключено"
     embed.add_field(name="База даних", value=db_status, inline=False)
