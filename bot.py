@@ -680,79 +680,7 @@ class DTEKChecker:
             await self._setup_page()
             await self._save_cookies()
     
-    async def _setup_page(self):
-        print("Настройка страницы...")
-        await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='networkidle', timeout=60000)
-        await self._random_delay(3000, 5000)
         
-        try:
-            captcha_checkbox = self.page.locator('iframe[src*="checkbox"]')
-            if await captcha_checkbox.count() > 0:
-                print("⚠️ Обнаружена капча! Используйте веб-интерфейс.")
-                for i in range(300):
-                    await asyncio.sleep(1)
-                    if await captcha_checkbox.count() == 0:
-                        print("✓ Капча пройдена!")
-                        await self._save_cookies()
-                        break
-        except:
-            pass
-        
-        await self._random_delay(1500, 2500)
-        
-        try:
-            close_btn = self.page.locator('button.m-attention__close')
-            if await close_btn.count() > 0:
-                await self._human_move_and_click(close_btn)
-        except:
-            pass
-        
-        city_input = self.page.locator('.discon-input-wrapper #city')
-        await city_input.wait_for(state='visible', timeout=10000)
-        await self._human_move_and_click(city_input)
-        await city_input.clear()
-        await self._human_type(city_input, 'княж')
-        await self._random_delay(1800, 2500)
-        
-        city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
-        await city_option.wait_for(state='visible', timeout=10000)
-        await self._human_move_and_click(city_option)
-        await self._random_delay(1000, 1800)
-        
-        street_input = self.page.locator('.discon-input-wrapper #street')
-        await street_input.wait_for(state='visible', timeout=10000)
-        await self._human_move_and_click(street_input)
-        await street_input.clear()
-        await self._human_type(street_input, 'киї')
-        await self._random_delay(1800, 2500)
-        
-        street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
-        await street_option.wait_for(state='visible', timeout=10000)
-        await self._human_move_and_click(street_option)
-        await self._random_delay(1000, 1800)
-        
-        house_input = self.page.locator('input#house_num')
-        await house_input.wait_for(state='visible', timeout=10000)
-        await self._human_move_and_click(house_input)
-        await house_input.clear()
-        await self._human_type(house_input, '168')
-        await self._random_delay(1800, 2500)
-        
-        house_option = self.page.locator('#house_numautocomplete-list > div:first-child')
-        await house_option.wait_for(state='visible', timeout=10000)
-        await self._human_move_and_click(house_option)
-        await self._random_delay(2500, 3500)
-        
-        try:
-            update_elem = self.page.locator('span.update')
-            await update_elem.wait_for(state='visible', timeout=15000)
-            self.last_update_date = await update_elem.text_content()
-            self.last_update_date = self.last_update_date.strip()
-            print(f"✓ Дата обновления: {self.last_update_date}")
-        except:
-            self.last_update_date = "Невідомо"
-        
-        print("✅ Страница настроена!")
     
     async def _close_survey_if_present(self):
         """Закрывает опрос если он появился - улучшенная версия"""
