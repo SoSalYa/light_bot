@@ -892,38 +892,39 @@ class DTEKChecker:
 
     
     def crop_screenshot(self, screenshot_bytes, top_crop=380, bottom_crop=520, left_crop=40, right_crop=40):
-    """Обрезает скриншот (улучшенная версия с более сильной обрезкой)"""
-    try:
-        image = Image.open(io.BytesIO(screenshot_bytes))
-        width, height = image.size
-        
-        left = left_crop
-        top = top_crop
-        right = width - right_crop
-        bottom = height - bottom_crop
-        
-        print(f"Обрезаю скриншот: {width}x{height} -> {right-left}x{bottom-top}")
-        
-        cropped = image.crop((left, top, right, bottom))
-        
-        output = io.BytesIO()
-        cropped.save(output, format='PNG', optimize=True, quality=95)
-        return output.getvalue()
-    except Exception as e:
-        print(f"⚠️ Ошибка при обрезке скриншота: {e}")
-        return screenshot_bytes
+        """Обрезает скриншот (улучшенная версия с более сильной обрезкой)"""
+        try:
+            image = Image.open(io.BytesIO(screenshot_bytes))
+            width, height = image.size
+            
+            left = left_crop
+            top = top_crop
+            right = width - right_crop
+            bottom = height - bottom_crop
+            
+            print(f"Обрезаю скриншот: {width}x{height} -> {right-left}x{bottom-top}")
+            
+            cropped = image.crop((left, top, right, bottom))
+            
+            output = io.BytesIO()
+            cropped.save(output, format='PNG', optimize=True, quality=95)
+            return output.getvalue()
+        except Exception as e:
+            print(f"⚠️ Ошибка при обрезке скриншота: {e}")
+            return screenshot_bytes
 
     async def analyze_schedule_image(self, image_bytes):
-    """Анализирует график отключений с помощью Claude API"""
-    try:
-        import anthropic
-        
-        # Конвертируем изображение в base64
-        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
-        
-        # Создаем клиент Anthropic (API ключ не нужен, он обрабатывается автоматически)
-        response = await asyncio.to_thread(
-            lambda: anthropic.Anthropic().messages.create(
+        """Анализирует график отключений с помощью Claude API"""
+        try:
+            import anthropic
+            
+            # Конвертируем изображение в base64
+            image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+            
+            # Создаем клиент Anthropic
+            client = anthropic.Anthropic()
+            
+            response = client.messages.create(
                 model="claude-sonnet-4-20250514",
                 max_tokens=2000,
                 messages=[{
@@ -966,73 +967,72 @@ class DTEKChecker:
                     ]
                 }]
             )
-        )
-        
-        # Извлекаем текст ответа
-        result_text = response.content[0].text.strip()
-        
-        # Убираем возможные markdown обертки
-        if result_text.startswith('```'):
-            result_text = result_text.split('```')[1]
-            if result_text.startswith('json'):
-                result_text = result_text[4:]
-        
-        # Парсим JSON
-        schedule_data = json.loads(result_text)
-        print(f"✅ График успешно проанализирован: {len(schedule_data.get('hours', []))} часов")
-        
-        return schedule_data
-        
-    except Exception as e:
-        print(f"⚠️ Ошибка анализа изображения: {e}")
-        import traceback
-        traceback.print_exc()
-        return None
-
-    def format_schedule_analysis(self, schedule_data):
-    """Форматирует результаты анализа графика в читаемый текст"""
-    if not schedule_data or 'hours' not in schedule_data:
-        return "Не вдалося проаналізувати графік"
-    
-    # Группируем периоды отключений
-    outages = []
-    current_outage = None
-    
-    for hour_info in schedule_data['hours']:
-        hour = hour_info['hour']
-        status = hour_info['status']
-        
-        if status == 'off':
-            # Полное отключение на час
-            if current_outage is None:
-                current_outage = {'start': hour.split('-')[0], 'end': hour.split('-')[1]}
-            else:
-                current_outage['end'] = hour.split('-')[1]
-        else:
-            if current_outage:
-                outages.append(f"{current_outage['start']}:00 - {current_outage['end']}:00")
-                current_outage = None
             
-            # Частичные отключения
-            if status == 'half_first':
-                start_h = hour.split('-')[0]
-                outages.append(f"{start_h}:00 - {start_h}:30")
-            elif status == 'half_second':
-                start_h = hour.split('-')[0]
-                outages.append(f"{start_h}:30 - {int(start_h)+1:02d}:00")
+            # Извлекаем текст ответа
+            result_text = response.content[0].text.strip()
+            
+            # Убираем возможные markdown обертки
+            if result_text.startswith('```'):
+                result_text = result_text.split('```')[1]
+                if result_text.startswith('json'):
+                    result_text = result_text[4:]
+            
+            # Парсим JSON
+            schedule_data = json.loads(result_text)
+            print(f"✅ График успешно проанализирован: {len(schedule_data.get('hours', []))} часов")
+            
+            return schedule_data
+            
+        except Exception as e:
+            print(f"⚠️ Ошибка анализа изображения: {e}")
+            import traceback
+            traceback.print_exc()
+            return None
     
-    # Закрываем последний период если есть
-    if current_outage:
-        outages.append(f"{current_outage['start']}:00 - {current_outage['end']}:00")
-    
-    if not outages:
-        return "✅ Відключень не заплановано!"
-    
-    result = "⚡ **Заплановані відключення:**\n"
-    for period in outages:
-        result += f"• {period}\n"
-    
-    return result
+    def format_schedule_analysis(self, schedule_data):
+        """Форматирует результаты анализа графика в читаемый текст"""
+        if not schedule_data or 'hours' not in schedule_data:
+            return "Не вдалося проаналізувати графік"
+        
+        # Группируем периоды отключений
+        outages = []
+        current_outage = None
+        
+        for hour_info in schedule_data['hours']:
+            hour = hour_info['hour']
+            status = hour_info['status']
+            
+            if status == 'off':
+                # Полное отключение на час
+                if current_outage is None:
+                    current_outage = {'start': hour.split('-')[0], 'end': hour.split('-')[1]}
+                else:
+                    current_outage['end'] = hour.split('-')[1]
+            else:
+                if current_outage:
+                    outages.append(f"{current_outage['start']}:00 - {current_outage['end']}:00")
+                    current_outage = None
+                
+                # Частичные отключения
+                if status == 'half_first':
+                    start_h = hour.split('-')[0]
+                    outages.append(f"{start_h}:00 - {start_h}:30")
+                elif status == 'half_second':
+                    start_h = hour.split('-')[0]
+                    outages.append(f"{start_h}:30 - {int(start_h)+1:02d}:00")
+        
+        # Закрываем последний период если есть
+        if current_outage:
+            outages.append(f"{current_outage['start']}:00 - {current_outage['end']}:00")
+        
+        if not outages:
+            return "✅ Відключень не заплановано!"
+        
+        result = "⚡ **Заплановані відключення:**\n"
+        for period in outages:
+            result += f"• {period}\n"
+        
+        return result
 
     async def make_screenshots(self):
     """Делает скриншоты и анализирует график - обновленная версия"""
