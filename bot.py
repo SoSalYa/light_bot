@@ -11,6 +11,13 @@ from aiohttp import web
 import random
 import json
 import base64
+try:
+    import anthropic
+    ANTHROPIC_AVAILABLE = True
+    print("✅ Anthropic library доступна")
+except ImportError:
+    ANTHROPIC_AVAILABLE = False
+    print("⚠️ Anthropic library не установлена. Установите: pip install anthropic")
 
 # Конфигурация
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
@@ -884,100 +891,235 @@ class DTEKChecker:
 
 
     
-    def crop_screenshot(self, screenshot_bytes, top_crop=300, bottom_crop=400, left_crop=0, right_crop=0):
-        """Обрезает скриншот"""
-        try:
-            image = Image.open(io.BytesIO(screenshot_bytes))
-            width, height = image.size
+    def crop_screenshot(self, screenshot_bytes, top_crop=380, bottom_crop=520, left_crop=40, right_crop=40):
+    """Обрезает скриншот (улучшенная версия с более сильной обрезкой)"""
+    try:
+        image = Image.open(io.BytesIO(screenshot_bytes))
+        width, height = image.size
+        
+        left = left_crop
+        top = top_crop
+        right = width - right_crop
+        bottom = height - bottom_crop
+        
+        print(f"Обрезаю скриншот: {width}x{height} -> {right-left}x{bottom-top}")
+        
+        cropped = image.crop((left, top, right, bottom))
+        
+        output = io.BytesIO()
+        cropped.save(output, format='PNG', optimize=True, quality=95)
+        return output.getvalue()
+    except Exception as e:
+        print(f"⚠️ Ошибка при обрезке скриншота: {e}")
+        return screenshot_bytes
+
+    async def analyze_schedule_image(self, image_bytes):
+    """Анализирует график отключений с помощью Claude API"""
+    try:
+        import anthropic
+        
+        # Конвертируем изображение в base64
+        image_base64 = base64.b64encode(image_bytes).decode('utf-8')
+        
+        # Создаем клиент Anthropic (API ключ не нужен, он обрабатывается автоматически)
+        response = await asyncio.to_thread(
+            lambda: anthropic.Anthropic().messages.create(
+                model="claude-sonnet-4-20250514",
+                max_tokens=2000,
+                messages=[{
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image",
+                            "source": {
+                                "type": "base64",
+                                "media_type": "image/png",
+                                "data": image_base64
+                            }
+                        },
+                        {
+                            "type": "text",
+                            "text": """Проанализируй этот график отключений электричества. 
+                            
+На графике показаны часовые интервалы (00-01, 01-02, 02-03 и т.д. до 23-24).
+Под каждым часом есть ячейка, которая может быть:
+- Полностью зачеркнута (⚡❌) = света НЕ будет весь час
+- Зачеркнута только верхняя половина = света НЕ будет первые 30 минут
+- Зачеркнута только нижняя половина = света НЕ будет вторые 30 минут  
+- Пустая (⚡ без зачеркивания) = свет БУДЕТ весь час
+
+Верни результат СТРОГО в JSON формате (без markdown кодблоков):
+{
+  "hours": [
+    {"hour": "00-01", "status": "on/off/half_first/half_second"},
+    {"hour": "01-02", "status": "on/off/half_first/half_second"},
+    ...
+  ]
+}
+
+где status:
+- "on" = свет будет
+- "off" = света не будет весь час
+- "half_first" = света не будет 00:00-00:30
+- "half_second" = света не будет 00:30-01:00"""
+                        }
+                    ]
+                }]
+            )
+        )
+        
+        # Извлекаем текст ответа
+        result_text = response.content[0].text.strip()
+        
+        # Убираем возможные markdown обертки
+        if result_text.startswith('```'):
+            result_text = result_text.split('```')[1]
+            if result_text.startswith('json'):
+                result_text = result_text[4:]
+        
+        # Парсим JSON
+        schedule_data = json.loads(result_text)
+        print(f"✅ График успешно проанализирован: {len(schedule_data.get('hours', []))} часов")
+        
+        return schedule_data
+        
+    except Exception as e:
+        print(f"⚠️ Ошибка анализа изображения: {e}")
+        import traceback
+        traceback.print_exc()
+        return None
+
+    def format_schedule_analysis(self, schedule_data):
+    """Форматирует результаты анализа графика в читаемый текст"""
+    if not schedule_data or 'hours' not in schedule_data:
+        return "Не вдалося проаналізувати графік"
+    
+    # Группируем периоды отключений
+    outages = []
+    current_outage = None
+    
+    for hour_info in schedule_data['hours']:
+        hour = hour_info['hour']
+        status = hour_info['status']
+        
+        if status == 'off':
+            # Полное отключение на час
+            if current_outage is None:
+                current_outage = {'start': hour.split('-')[0], 'end': hour.split('-')[1]}
+            else:
+                current_outage['end'] = hour.split('-')[1]
+        else:
+            if current_outage:
+                outages.append(f"{current_outage['start']}:00 - {current_outage['end']}:00")
+                current_outage = None
             
-            left = left_crop
-            top = top_crop
-            right = width - right_crop
-            bottom = height - bottom_crop
-            
-            print(f"Обрезаю скриншот: {width}x{height} -> {right-left}x{bottom-top}")
-            
-            cropped = image.crop((left, top, right, bottom))
-            
-            output = io.BytesIO()
-            cropped.save(output, format='PNG', optimize=True, quality=95)
-            return output.getvalue()
-        except Exception as e:
-            print(f"⚠ Ошибка при обрезке скриншота: {e}")
-            return screenshot_bytes
+            # Частичные отключения
+            if status == 'half_first':
+                start_h = hour.split('-')[0]
+                outages.append(f"{start_h}:00 - {start_h}:30")
+            elif status == 'half_second':
+                start_h = hour.split('-')[0]
+                outages.append(f"{start_h}:30 - {int(start_h)+1:02d}:00")
+    
+    # Закрываем последний период если есть
+    if current_outage:
+        outages.append(f"{current_outage['start']}:00 - {current_outage['end']}:00")
+    
+    if not outages:
+        return "✅ Відключень не заплановано!"
+    
+    result = "⚡ **Заплановані відключення:**\n"
+    for period in outages:
+        result += f"• {period}\n"
+    
+    return result
 
     async def make_screenshots(self):
-        """Делает скриншоты - обновленная версия"""
+    """Делает скриншоты и анализирует график - обновленная версия"""
+    try:
+        # Агрессивно закрываем все модальные окна
+        await self._close_survey_if_present()
+        await asyncio.sleep(0.5)
+        await self._close_survey_if_present()
+        
+        print("Делаю скриншот основного графика...")
+        screenshot_main = await asyncio.wait_for(
+            self.page.screenshot(full_page=True, type='png'),
+            timeout=30
+        )
+        screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=380, bottom_crop=520)
+        print("✅ Скриншот основного графика готов")
+        
+        # Анализируем график
+        print("🔍 Анализирую график отключений...")
+        schedule_analysis = await self.analyze_schedule_image(screenshot_main_cropped)
+        schedule_text = self.format_schedule_analysis(schedule_analysis)
+        print(f"✅ Анализ завершен:\n{schedule_text}")
+        
+        print("Кликаю на второй график (завтра)...")
+        second_date = None
+        screenshot_tomorrow_cropped = None
+        schedule_tomorrow_text = None
+        
         try:
-            # Агрессивно закрываем все модальные окна
-            await self._close_survey_if_present()
-            await asyncio.sleep(0.5)
-            await self._close_survey_if_present()
+            date_selector = self.page.locator('div.date:nth-child(2)')
+            await date_selector.wait_for(state='visible', timeout=15000)
             
-            print("Делаю скриншот основного графика...")
-            screenshot_main = await asyncio.wait_for(
+            second_date = await date_selector.text_content()
+            second_date = second_date.strip()
+            print(f"Дата второго графика: {second_date}")
+            
+            await date_selector.click()
+            print("✅ Кликнул на второй график, жду загрузки...")
+            await asyncio.sleep(3)
+            
+            await self._close_survey_if_present()
+            await asyncio.sleep(1)
+            
+            print("Делаю скриншот второго графика...")
+            screenshot_tomorrow = await asyncio.wait_for(
                 self.page.screenshot(full_page=True, type='png'),
                 timeout=30
             )
-            screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
-            print("✓ Скриншот основного графика готов")
+            screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=380, bottom_crop=520)
+            print("✅ Скриншот второго графика готов")
             
-            print("Кликаю на второй график (завтра)...")
-            second_date = None
-            screenshot_tomorrow_cropped = None
-            try:
-                date_selector = self.page.locator('div.date:nth-child(2)')
-                await date_selector.wait_for(state='visible', timeout=15000)
-                
-                second_date = await date_selector.text_content()
-                second_date = second_date.strip()
-                print(f"Дата второго графика: {second_date}")
-                
-                await date_selector.click()
-                print("✓ Кликнул на второй график, жду загрузки...")
-                await asyncio.sleep(3)
-                
-                # Закрываем опрос который мог появиться после переключения
-                await self._close_survey_if_present()
-                await asyncio.sleep(1)
-                
-                print("Делаю скриншот второго графика...")
-                screenshot_tomorrow = await asyncio.wait_for(
-                    self.page.screenshot(full_page=True, type='png'),
-                    timeout=30
-                )
-                screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
-                print("✓ Скриншот второго графика готов")
-                
-                print("Возвращаюсь на первый график...")
-                first_date = self.page.locator('div.date:nth-child(1)')
-                await first_date.wait_for(state='visible', timeout=10000)
-                await first_date.click()
-                await asyncio.sleep(2)
-                
-                # Закрываем опрос после возврата на первый график
-                await self._close_survey_if_present()
-                
-                print(f"✓ Вернулся на первый график")
-                
-            except asyncio.TimeoutError as te:
-                print(f"⚠ Таймаут при работе со вторым графиком: {te}")
-            except Exception as e:
-                print(f"⚠ Не удалось получить второй график: {e}")
+            # Анализируем график на завтра
+            print("🔍 Анализирую график на завтра...")
+            schedule_tomorrow_analysis = await self.analyze_schedule_image(screenshot_tomorrow_cropped)
+            schedule_tomorrow_text = self.format_schedule_analysis(schedule_tomorrow_analysis)
+            print(f"✅ Анализ завтра завершен:\n{schedule_tomorrow_text}")
             
-            return {
-                'screenshot_main': screenshot_main_cropped,
-                'screenshot_tomorrow': screenshot_tomorrow_cropped,
-                'update_date': self.last_update_date,
-                'second_date': second_date,
-                'timestamp': datetime.now().isoformat()
-            }
+            print("Возвращаюсь на первый график...")
+            first_date = self.page.locator('div.date:nth-child(1)')
+            await first_date.wait_for(state='visible', timeout=10000)
+            await first_date.click()
+            await asyncio.sleep(2)
             
+            await self._close_survey_if_present()
+            
+            print(f"✅ Вернулся на первый график")
+            
+        except asyncio.TimeoutError as te:
+            print(f"⚠️ Таймаут при работе со вторым графиком: {te}")
         except Exception as e:
-            print(f"✘ Ошибка при создании скриншотов: {e}")
-            import traceback
-            traceback.print_exc()
-            raise
+            print(f"⚠️ Не удалось получить второй график: {e}")
+        
+        return {
+            'screenshot_main': screenshot_main_cropped,
+            'screenshot_tomorrow': screenshot_tomorrow_cropped,
+            'update_date': self.last_update_date,
+            'second_date': second_date,
+            'schedule_analysis': schedule_text,
+            'schedule_tomorrow_analysis': schedule_tomorrow_text,
+            'timestamp': datetime.now().isoformat()
+        }
+        
+    except Exception as e:
+        print(f"✘ Ошибка при создании скриншотов: {e}")
+        import traceback
+        traceback.print_exc()
+        raise
        
 
     async def close_browser(self):
@@ -1077,6 +1219,14 @@ async def check_schedule():
                 inline=False
             )
         
+        # Добавляем анализ графика
+        if result.get('schedule_analysis'):
+            embed.add_field(
+                name="📊 Аналіз графіка відключень",
+                value=result['schedule_analysis'],
+                inline=False
+            )
+        
         embed.add_field(
             name="✅ Статус",
             value="**🔔 ІНФОРМАЦІЯ ОНОВИЛАСЬ!**",
@@ -1100,6 +1250,14 @@ async def check_schedule():
                 timestamp=datetime.now()
             )
             
+            # Добавляем анализ графика на завтра
+            if result.get('schedule_tomorrow_analysis'):
+                embed_tomorrow.add_field(
+                    name="📊 Аналіз графіка відключень",
+                    value=result['schedule_tomorrow_analysis'],
+                    inline=False
+                )
+            
             file_tomorrow = discord.File(
                 io.BytesIO(result['screenshot_tomorrow']), 
                 filename=f"dtek_tomorrow_{timestamp_str}.png"
@@ -1107,7 +1265,7 @@ async def check_schedule():
             
             await channel.send(embed=embed_tomorrow, file=file_tomorrow)
         
-        print(f"✓ Сообщение отправлено в Discord")
+        print(f"✅ Сообщение отправлено в Discord")
         print(f"{'='*50}\n")
         
     except asyncio.TimeoutError:
@@ -1174,6 +1332,14 @@ async def manual_check(ctx):
                 inline=False
             )
         
+        # Добавляем анализ графика
+        if result.get('schedule_analysis'):
+            embed.add_field(
+                name="📊 Аналіз графіка відключень",
+                value=result['schedule_analysis'],
+                inline=False
+            )
+        
         embed.set_footer(text="Ручна перевірка • Запущено командою !check")
         
         timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
@@ -1191,6 +1357,14 @@ async def manual_check(ctx):
                 color=discord.Color.blue(),
                 timestamp=datetime.now()
             )
+            
+            # Добавляем анализ графика на завтра
+            if result.get('schedule_tomorrow_analysis'):
+                embed_tomorrow.add_field(
+                    name="📊 Аналіз графіка відключень",
+                    value=result['schedule_tomorrow_analysis'],
+                    inline=False
+                )
             
             file_tomorrow = discord.File(
                 io.BytesIO(result['screenshot_tomorrow']), 
