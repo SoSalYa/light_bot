@@ -1035,91 +1035,91 @@ class DTEKChecker:
         return result
 
     async def make_screenshots(self):
-    """Делает скриншоты и анализирует график - обновленная версия"""
-    try:
-        # Агрессивно закрываем все модальные окна
-        await self._close_survey_if_present()
-        await asyncio.sleep(0.5)
-        await self._close_survey_if_present()
-        
-        print("Делаю скриншот основного графика...")
-        screenshot_main = await asyncio.wait_for(
-            self.page.screenshot(full_page=True, type='png'),
-            timeout=30
-        )
-        screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=380, bottom_crop=520)
-        print("✅ Скриншот основного графика готов")
-        
-        # Анализируем график
-        print("🔍 Анализирую график отключений...")
-        schedule_analysis = await self.analyze_schedule_image(screenshot_main_cropped)
-        schedule_text = self.format_schedule_analysis(schedule_analysis)
-        print(f"✅ Анализ завершен:\n{schedule_text}")
-        
-        print("Кликаю на второй график (завтра)...")
-        second_date = None
-        screenshot_tomorrow_cropped = None
-        schedule_tomorrow_text = None
-        
+        """Делает скриншоты и анализирует график - обновленная версия"""
         try:
-            date_selector = self.page.locator('div.date:nth-child(2)')
-            await date_selector.wait_for(state='visible', timeout=15000)
-            
-            second_date = await date_selector.text_content()
-            second_date = second_date.strip()
-            print(f"Дата второго графика: {second_date}")
-            
-            await date_selector.click()
-            print("✅ Кликнул на второй график, жду загрузки...")
-            await asyncio.sleep(3)
-            
+            # Агрессивно закрываем все модальные окна
             await self._close_survey_if_present()
-            await asyncio.sleep(1)
+            await asyncio.sleep(0.5)
+            await self._close_survey_if_present()
             
-            print("Делаю скриншот второго графика...")
-            screenshot_tomorrow = await asyncio.wait_for(
+            print("Делаю скриншот основного графика...")
+            screenshot_main = await asyncio.wait_for(
                 self.page.screenshot(full_page=True, type='png'),
                 timeout=30
             )
-            screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=380, bottom_crop=520)
-            print("✅ Скриншот второго графика готов")
+            screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=380, bottom_crop=520)
+            print("✅ Скриншот основного графика готов")
             
-            # Анализируем график на завтра
-            print("🔍 Анализирую график на завтра...")
-            schedule_tomorrow_analysis = await self.analyze_schedule_image(screenshot_tomorrow_cropped)
-            schedule_tomorrow_text = self.format_schedule_analysis(schedule_tomorrow_analysis)
-            print(f"✅ Анализ завтра завершен:\n{schedule_tomorrow_text}")
+            # Анализируем график
+            print("🔍 Анализирую график отключений...")
+            schedule_analysis = await self.analyze_schedule_image(screenshot_main_cropped)
+            schedule_text = self.format_schedule_analysis(schedule_analysis)
+            print(f"✅ Анализ завершен:\n{schedule_text}")
             
-            print("Возвращаюсь на первый график...")
-            first_date = self.page.locator('div.date:nth-child(1)')
-            await first_date.wait_for(state='visible', timeout=10000)
-            await first_date.click()
-            await asyncio.sleep(2)
+            print("Кликаю на второй график (завтра)...")
+            second_date = None
+            screenshot_tomorrow_cropped = None
+            schedule_tomorrow_text = None
             
-            await self._close_survey_if_present()
+            try:
+                date_selector = self.page.locator('div.date:nth-child(2)')
+                await date_selector.wait_for(state='visible', timeout=15000)
+                
+                second_date = await date_selector.text_content()
+                second_date = second_date.strip()
+                print(f"Дата второго графика: {second_date}")
+                
+                await date_selector.click()
+                print("✅ Кликнул на второй график, жду загрузки...")
+                await asyncio.sleep(3)
+                
+                await self._close_survey_if_present()
+                await asyncio.sleep(1)
+                
+                print("Делаю скриншот второго графика...")
+                screenshot_tomorrow = await asyncio.wait_for(
+                    self.page.screenshot(full_page=True, type='png'),
+                    timeout=30
+                )
+                screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=380, bottom_crop=520)
+                print("✅ Скриншот второго графика готов")
+                
+                # Анализируем график на завтра
+                print("🔍 Анализирую график на завтра...")
+                schedule_tomorrow_analysis = await self.analyze_schedule_image(screenshot_tomorrow_cropped)
+                schedule_tomorrow_text = self.format_schedule_analysis(schedule_tomorrow_analysis)
+                print(f"✅ Анализ завтра завершен:\n{schedule_tomorrow_text}")
+                
+                print("Возвращаюсь на первый график...")
+                first_date = self.page.locator('div.date:nth-child(1)')
+                await first_date.wait_for(state='visible', timeout=10000)
+                await first_date.click()
+                await asyncio.sleep(2)
+                
+                await self._close_survey_if_present()
+                
+                print(f"✅ Вернулся на первый график")
+                
+            except asyncio.TimeoutError as te:
+                print(f"⚠️ Таймаут при работе со вторым графиком: {te}")
+            except Exception as e:
+                print(f"⚠️ Не удалось получить второй график: {e}")
             
-            print(f"✅ Вернулся на первый график")
+            return {
+                'screenshot_main': screenshot_main_cropped,
+                'screenshot_tomorrow': screenshot_tomorrow_cropped,
+                'update_date': self.last_update_date,
+                'second_date': second_date,
+                'schedule_analysis': schedule_text,
+                'schedule_tomorrow_analysis': schedule_tomorrow_text,
+                'timestamp': datetime.now().isoformat()
+            }
             
-        except asyncio.TimeoutError as te:
-            print(f"⚠️ Таймаут при работе со вторым графиком: {te}")
         except Exception as e:
-            print(f"⚠️ Не удалось получить второй график: {e}")
-        
-        return {
-            'screenshot_main': screenshot_main_cropped,
-            'screenshot_tomorrow': screenshot_tomorrow_cropped,
-            'update_date': self.last_update_date,
-            'second_date': second_date,
-            'schedule_analysis': schedule_text,
-            'schedule_tomorrow_analysis': schedule_tomorrow_text,
-            'timestamp': datetime.now().isoformat()
-        }
-        
-    except Exception as e:
-        print(f"✘ Ошибка при создании скриншотов: {e}")
-        import traceback
-        traceback.print_exc()
-        raise
+            print(f"✘ Ошибка при создании скриншотов: {e}")
+            import traceback
+            traceback.print_exc()
+            raise
        
 
     async def close_browser(self):
