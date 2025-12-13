@@ -11,15 +11,9 @@ from aiohttp import web
 import random
 import json
 import base64
-try:
-    import anthropic
-    ANTHROPIC_AVAILABLE = True
-    print("✅ Anthropic library доступна")
-except ImportError:
-    ANTHROPIC_AVAILABLE = False
-    print("⚠️ Anthropic library не установлена. Установите: pip install anthropic")
+import hashlib
 
-# Конфигурация
+# Конфігурація
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID'))
 DATABASE_URL = os.getenv('DATABASE_URL')
@@ -28,13 +22,13 @@ PORT = int(os.getenv('PORT', 10000))
 # Database pool
 db_pool = None
 
-# Создание бота
+# Створення бота
 intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
 async def init_db_pool():
-    """Инициализация connection pool для PostgreSQL"""
+    """Ініціалізація connection pool для PostgreSQL"""
     global db_pool
     if not db_pool:
         db_pool = await asyncpg.create_pool(
@@ -43,14 +37,24 @@ async def init_db_pool():
             max_size=10,
             command_timeout=60
         )
-        print("✓ Database pool создан")
+        # Створюємо таблицю якщо не існує
+        async with db_pool.acquire() as conn:
+            await conn.execute('''
+                CREATE TABLE IF NOT EXISTS dtek_checks (
+                    id SERIAL PRIMARY KEY,
+                    update_date TEXT,
+                    schedule_hash TEXT,
+                    created_at TIMESTAMP
+                )
+            ''')
+        print("✅ Database pool створено")
 
 async def close_db_pool():
-    """Закрытие connection pool"""
+    """Закриття connection pool"""
     global db_pool
     if db_pool:
         await db_pool.close()
-        print("✓ Database pool закрыт")
+        print("✅ Database pool закрито")
 
 # HTTP сервер для Render health checks + VNC interface
 async def handle_health(request):
@@ -264,21 +268,21 @@ async def handle_root(request):
             </div>
             
             <div class="instructions">
-                <h3>📖 Как использовать:</h3>
+                <h3>📖 Як використовувати:</h3>
                 <ul>
-                    <li><strong>Кликайте по скриншоту</strong> - клики передаются в браузер бота</li>
-                    <li><strong>Обновить скриншот</strong> - получить актуальное изображение</li>
-                    <li><strong>Пройти капчу</strong> - кликайте по элементам капчи прямо на скриншоте</li>
-                    <li>Скриншоты обновляются автоматически каждые 3 секунды</li>
+                    <li><strong>Клікайте по скріншоту</strong> - кліки передаються в браузер бота</li>
+                    <li><strong>Оновити скріншот</strong> - получить актуальне зображення</li>
+                    <li><strong>Пройти капчу</strong> - клікайте по елементам капчі прямо на скріншоті</li>
+                    <li>Скріншоти оновлюються автоматично кожні 3 секунди</li>
                 </ul>
             </div>
             
             <div class="control-panel">
-                <h2>🎮 Панель управления</h2>
+                <h2>🎮 Панель управління</h2>
                 <div class="buttons">
-                    <button class="btn-primary" onclick="refreshScreenshot()">🔄 Обновить скриншот</button>
-                    <button class="btn-success" onclick="initBrowser()">🚀 Инициализировать браузер</button>
-                    <button class="btn-info" onclick="manualCheck()">✅ Сделать проверку</button>
+                    <button class="btn-primary" onclick="refreshScreenshot()">🔄 Оновити скріншот</button>
+                    <button class="btn-success" onclick="initBrowser()">🚀 Ініціалізувати браузер</button>
+                    <button class="btn-info" onclick="manualCheck()">✅ Зделать проверку</button>
                     <button class="btn-danger" onclick="clearCookies()">🍪 Очистить куки</button>
                 </div>
             </div>
@@ -355,14 +359,14 @@ async def handle_root(request):
             }
             
             async function initBrowser() {
-                document.getElementById('status').textContent = '⏳ Инициализация...';
+                document.getElementById('status').textContent = '⏳ Ініціалізація...';
                 try {
                     const data = await request('/api/init');
                     alert(data.message);
                     await updateStatus();
                     await refreshScreenshot();
                 } catch (e) {
-                    alert('Ошибка: ' + e.message);
+                    alert('Помилка: ' + e.message);
                 }
             }
             
@@ -373,7 +377,7 @@ async def handle_root(request):
                     alert(data.message);
                     await refreshScreenshot();
                 } catch (e) {
-                    alert('Ошибка: ' + e.message);
+                    alert('Помилка: ' + e.message);
                 }
             }
             
@@ -383,7 +387,7 @@ async def handle_root(request):
                     alert(data.message);
                     await updateStatus();
                 } catch (e) {
-                    alert('Ошибка: ' + e.message);
+                    alert('Помилка: ' + e.message);
                 }
             }
             
@@ -427,7 +431,7 @@ async def handle_root(request):
                     document.getElementById('cookies-status').textContent = data.cookies;
                     
                     const statusElem = document.getElementById('status');
-                    if (data.browser === '✅ Открыт') {
+                    if (data.browser === '✅ Відкритий') {
                         statusElem.className = 'status online';
                         statusElem.textContent = '🟢 Online';
                     } else {
@@ -498,12 +502,12 @@ async def handle_init(request):
     try:
         await checker.init_browser()
         return web.json_response({
-            'message': 'Браузер инициализирован успешно!',
+            'message': 'Браузер ініціалізовано успішно!',
             'success': True
         })
     except Exception as e:
         return web.json_response({
-            'message': f'Ошибка инициализации: {str(e)}',
+            'message': f'Помилка ініціалізації: {str(e)}',
             'success': False
         }, status=500)
 
@@ -512,13 +516,13 @@ async def handle_check(request):
     try:
         result = await checker.make_screenshots()
         return web.json_response({
-            'message': 'Проверка выполнена успешно!',
+            'message': 'Перевірка виконана успішно!',
             'success': True,
             'update_date': result.get('update_date')
         })
     except Exception as e:
         return web.json_response({
-            'message': f'Ошибка проверки: {str(e)}',
+            'message': f'Помилка перевірки: {str(e)}',
             'success': False
         }, status=500)
 
@@ -528,19 +532,19 @@ async def handle_clear_cookies(request):
         if os.path.exists(checker.cookies_file):
             os.remove(checker.cookies_file)
         return web.json_response({
-            'message': 'Куки успешно удалены',
+            'message': 'Куки успішно видалено',
             'success': True
         })
     except Exception as e:
         return web.json_response({
-            'message': f'Ошибка: {str(e)}',
+            'message': f'Помилка: {str(e)}',
             'success': False
         }, status=500)
 
 async def handle_status(request):
     """API: Получить статус бота"""
-    browser_status = "✅ Открыт" if checker.browser else "❌ Закрыт"
-    cookies_status = "✅ Есть" if os.path.exists(checker.cookies_file) else "❌ Нет"
+    browser_status = "✅ Відкритий" if checker.browser else "❌ Закритий"
+    cookies_status = "✅ Є" if os.path.exists(checker.cookies_file) else "❌ Немає"
     
     return web.json_response({
         'browser': browser_status,
@@ -549,7 +553,7 @@ async def handle_status(request):
     })
 
 async def start_web_server():
-    """Запуск веб-сервера с VNC интерфейсом"""
+    """Запуск веб-сервера з VNC інтерфейсом"""
     app = web.Application()
     
     app.router.add_get('/', handle_root)
@@ -591,9 +595,9 @@ class DTEKChecker:
                 cookies = await self.context.cookies()
                 with open(self.cookies_file, 'w') as f:
                     json.dump(cookies, f)
-                print("✓ Куки сохранены")
+                print("✓ Куки збережено")
         except Exception as e:
-            print(f"⚠ Не удалось сохранить куки: {e}")
+            print(f"⚠ Не вдалося зберегти куки: {e}")
     
     async def _load_cookies(self):
         try:
@@ -601,10 +605,10 @@ class DTEKChecker:
                 with open(self.cookies_file, 'r') as f:
                     cookies = json.load(f)
                 await self.context.add_cookies(cookies)
-                print("✓ Куки загружены")
+                print("✓ Куки завантажено")
                 return True
         except Exception as e:
-            print(f"⚠ Не удалось загрузить куки: {e}")
+            print(f"⚠ Не вдалося завантажити куки: {e}")
         return False
     
     async def _random_delay(self, min_ms=100, max_ms=500):
@@ -658,13 +662,13 @@ class DTEKChecker:
                     args=browser_args,
                     channel='chrome'
                 )
-                print("✓ Chrome запущен")
+                print("✓ Chrome запущено")
             except:
                 self.browser = await self.playwright.chromium.launch(
                     headless=True,
                     args=browser_args
                 )
-                print("✓ Chromium запущен")
+                print("✓ Chromium запущено")
             
             user_agent = self._get_random_user_agent()
             
@@ -687,19 +691,13 @@ class DTEKChecker:
             await self._setup_page()
             await self._save_cookies()
     
-        
-    
     async def _close_survey_if_present(self):
-        """Закрывает опрос если он появился - улучшенная версия"""
+        """Закриває опрос якщо він з'явився"""
         try:
-            # 1. Пробуем найти модальное окно по паттерну с любым номером
-            # Используем JavaScript для поиска элемента с подходящим ID
             modal_found = await self.page.evaluate("""
                 () => {
-                    // Ищем все элементы с ID начинающимся на modal-questionnaire-welcome-
                     const modals = document.querySelectorAll('[id^="modal-questionnaire-welcome-"]');
                     for (const modal of modals) {
-                        // Проверяем видимость модального окна
                         const style = window.getComputedStyle(modal);
                         if (style.display !== 'none' && style.visibility !== 'hidden') {
                             return modal.id;
@@ -710,19 +708,16 @@ class DTEKChecker:
             """)
             
             if modal_found:
-                print(f"✓ Найдено модальное окно опроса: {modal_found}")
-                
-                # Пробуем закрыть через специфичный селектор
+                print(f"✓ Знайдено модальне вікно опросу: {modal_found}")
                 close_selector = f"#{modal_found} .modal__close"
                 close_btn = self.page.locator(close_selector)
                 
                 if await close_btn.count() > 0:
                     await close_btn.click()
                     await asyncio.sleep(1)
-                    print(f"✓ Опрос закрыт через селектор: {close_selector}")
+                    print(f"✓ Опрос закрито через селектор: {close_selector}")
                     return True
             
-            # 2. Дополнительная проверка - ищем кнопку закрытия по общим селекторам
             generic_selectors = [
                 '.modal__close',
                 'button.modal__close',
@@ -736,35 +731,30 @@ class DTEKChecker:
                 if await close_btn.count() > 0 and await close_btn.is_visible():
                     await close_btn.click()
                     await asyncio.sleep(1)
-                    print(f"✓ Опрос закрыт через общий селектор: {selector}")
+                    print(f"✓ Опрос закрито через загальний селектор: {selector}")
                     return True
             
-            # 3. Альтернативный метод - поиск через текст кнопки
             try:
-                # Ищем кнопку с крестиком или текстом закрытия
                 close_by_text = self.page.locator('button:has-text("×"), button:has-text("✕")')
                 if await close_by_text.count() > 0:
                     first_close = close_by_text.first
                     if await first_close.is_visible():
                         await first_close.click()
                         await asyncio.sleep(1)
-                        print("✓ Опрос закрыт через поиск по символу закрытия")
+                        print("✓ Опрос закрито через пошук по символу закриття")
                         return True
             except:
                 pass
             
-            print("⚪ Модальное окно опроса не найдено")
             return False
                     
         except Exception as e:
-            print(f"⚠ Ошибка при закрытии опроса: {e}")
+            print(f"⚠ Помилка при закритті опросу: {e}")
             return False
 
-
     async def _wait_and_close_survey(self, timeout=3):
-        """Ждет появления опроса и закрывает его"""
+        """Чекає появи опросу і закриває його"""
         try:
-            # Ждем немного и проверяем несколько раз
             for i in range(timeout):
                 if await self._close_survey_if_present():
                     return True
@@ -773,23 +763,20 @@ class DTEKChecker:
         except:
             return False
 
-
     async def _setup_page(self):
-        """Настройка страницы - обновленная версия"""
-        print("Настройка страницы...")
+        """Налаштування сторінки"""
+        print("Налаштування сторінки...")
         await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='networkidle', timeout=60000)
         await self._random_delay(3000, 5000)
         
-        # Закрываем опрос сразу после загрузки
         await self._wait_and_close_survey(timeout=3)
         
         try:
             captcha_checkbox = self.page.locator('iframe[src*="checkbox"]')
             if await captcha_checkbox.count() > 0:
-                print("⚠️ Обнаружена капча! Используйте веб-интерфейс.")
+                print("⚠️ Виявлено капчу! Використовуйте веб-інтерфейс.")
                 for i in range(300):
                     await asyncio.sleep(1)
-                    # Проверяем опрос каждые 10 секунд во время ожидания капчи
                     if i % 10 == 0:
                         await self._close_survey_if_present()
                     if await captcha_checkbox.count() == 0:
@@ -800,8 +787,6 @@ class DTEKChecker:
             pass
         
         await self._random_delay(1500, 2500)
-        
-        # Еще раз проверяем опрос перед началом работы
         await self._close_survey_if_present()
         
         try:
@@ -811,12 +796,11 @@ class DTEKChecker:
         except:
             pass
         
-        # Остальной код заполнения формы остается без изменений...
         city_input = self.page.locator('.discon-input-wrapper #city')
         await city_input.wait_for(state='visible', timeout=10000)
         await self._human_move_and_click(city_input)
         await city_input.clear()
-        await self._human_type(city_input, 'княж')
+        await self._human_type(city_input, 'книж')
         await self._random_delay(1800, 2500)
         
         city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
@@ -848,7 +832,6 @@ class DTEKChecker:
         await self._human_move_and_click(house_option)
         await self._random_delay(2500, 3500)
         
-        # Финальная проверка опроса
         await self._close_survey_if_present()
         
         try:
@@ -856,17 +839,15 @@ class DTEKChecker:
             await update_elem.wait_for(state='visible', timeout=15000)
             self.last_update_date = await update_elem.text_content()
             self.last_update_date = self.last_update_date.strip()
-            print(f"✓ Дата обновления: {self.last_update_date}")
+            print(f"✓ Дата оновлення: {self.last_update_date}")
         except:
             self.last_update_date = "Невідомо"
         
-        print("✅ Страница настроена!")
-
+        print("✅ Сторінка налаштована!")
 
     async def check_for_update(self):
-        """Проверяет изменилась ли дата - обновленная версия"""
+        """Перевіряє чи змінилась дата"""
         try:
-            # Закрываем опрос ПЕРЕД проверкой
             await self._close_survey_if_present()
             
             if random.random() < 0.3:
@@ -877,22 +858,123 @@ class DTEKChecker:
             current_date = await update_elem.text_content()
             current_date = current_date.strip()
             
-            print(f"Текущая дата: {current_date}, Последняя: {self.last_update_date}")
+            print(f"Поточна дата: {current_date}, Остання: {self.last_update_date}")
             
             if current_date != self.last_update_date:
-                print("🔔 ОБНОВЛЕНИЕ ОБНАРУЖЕНО!")
+                print("📢 ОНОВЛЕННЯ ВИЯВЛЕНО!")
                 self.last_update_date = current_date
                 await self._save_cookies()
                 return True
             return False
         except Exception as e:
-            print(f"Ошибка при проверке: {e}")
+            print(f"Помилка при перевірці: {e}")
             return False
 
+    async def parse_schedule(self):
+        """
+        Парсить графік відключень з активної вкладки
+        
+        Повертає:
+        {
+            'date': 'дата графіка',
+            'hours': список годин,
+            'schedule': {
+                'hour': {
+                    'status': 'powered'|'scheduled'|'first-half'|'second-half',
+                    'class': 'клас елемента'
+                }
+            }
+        }
+        """
+        try:
+            date_elem = self.page.locator('.date.active')
+            schedule_date = await date_elem.text_content()
+            schedule_date = schedule_date.strip() if schedule_date else "Невідомо"
+            
+            result = {
+                'date': schedule_date,
+                'hours': [],
+                'schedule': {}
+            }
+            
+            # Парсимо години (2-25)
+            for i in range(2, 26):
+                try:
+                    hour_selector = f'.active > table th:nth-child({i})'
+                    hour_elem = self.page.locator(hour_selector)
+                    hour_text = await hour_elem.text_content()
+                    hour_text = hour_text.strip()
+                    result['hours'].append(hour_text)
+                except:
+                    result['hours'].append(f"??:??")
+            
+            # Парсимо статуси (2-25)
+            for i in range(2, 26):
+                try:
+                    cell_selector = f'.active > table td:nth-child({i})'
+                    cell_elem = self.page.locator(cell_selector)
+                    cell_class = await cell_elem.get_attribute('class')
+                    cell_class = cell_class.strip() if cell_class else ""
+                    
+                    hour = result['hours'][i-2]
+                    
+                    # Визначаємо статус
+                    if 'cell-scheduled' in cell_class:
+                        status = 'scheduled'  # Відключення
+                    elif 'cell-non-scheduled' in cell_class:
+                        status = 'powered'  # Світло є
+                    elif 'cell-first-half' in cell_class:
+                        status = 'first-half'  # Перші 30 хв
+                    elif 'cell-second-half' in cell_class:
+                        status = 'second-half'  # Другі 30 хв
+                    else:
+                        status = 'powered'  # За замовчуванням - світло є
+                    
+                    result['schedule'][hour] = {
+                        'status': status,
+                        'class': cell_class
+                    }
+                    
+                except Exception as e:
+                    hour = result['hours'][i-2] if i-2 < len(result['hours']) else "??:??"
+                    result['schedule'][hour] = {
+                        'status': 'error',
+                        'class': ''
+                    }
+            
+            return result
+            
+        except Exception as e:
+            print(f"Помилка парсингу: {e}")
+            return None
 
-    
-    def crop_screenshot(self, screenshot_bytes, top_crop=380, bottom_crop=520, left_crop=40, right_crop=40):
-        """Обрезает скриншот (улучшенная версия с более сильной обрезкой)"""
+    def _calculate_schedule_hash(self, schedule):
+        """Розраховує хеш графіка для порівняння"""
+        if not schedule:
+            return None
+        
+        # Створюємо рядок з усіх статусів
+        status_string = ""
+        for hour in sorted(schedule['schedule'].keys()):
+            status_string += f"{hour}:{schedule['schedule'][hour]['status']};"
+        
+        # Хешуємо
+        return hashlib.md5(status_string.encode()).hexdigest()
+
+    def _has_any_outages(self, schedule):
+        """Перевіряє чи є хоч одне відключення в графіку"""
+        if not schedule or not schedule.get('schedule'):
+            return False
+        
+        for hour_data in schedule['schedule'].values():
+            status = hour_data.get('status')
+            if status in ['scheduled', 'first-half', 'second-half']:
+                return True
+        
+        return False
+
+    def crop_screenshot(self, screenshot_bytes, top_crop=300, bottom_crop=400, left_crop=0, right_crop=0):
+        """Обрізає скріншот"""
         try:
             image = Image.open(io.BytesIO(screenshot_bytes))
             width, height = image.size
@@ -902,7 +984,7 @@ class DTEKChecker:
             right = width - right_crop
             bottom = height - bottom_crop
             
-            print(f"Обрезаю скриншот: {width}x{height} -> {right-left}x{bottom-top}")
+            print(f"Обрізаю скріншот: {width}x{height} -> {right-left}x{bottom-top}")
             
             cropped = image.crop((left, top, right, bottom))
             
@@ -910,156 +992,32 @@ class DTEKChecker:
             cropped.save(output, format='PNG', optimize=True, quality=95)
             return output.getvalue()
         except Exception as e:
-            print(f"⚠️ Ошибка при обрезке скриншота: {e}")
+            print(f"⚠ Помилка при обрізці скріншота: {e}")
             return screenshot_bytes
 
-    async def analyze_schedule_image(self, image_bytes):
-        """Анализирует график отключений с помощью Claude API"""
-        try:
-            import anthropic
-            
-            # Конвертируем изображение в base64
-            image_base64 = base64.b64encode(image_bytes).decode('utf-8')
-            
-            # Создаем клиент Anthropic
-            client = anthropic.Anthropic()
-            
-            response = client.messages.create(
-                model="claude-sonnet-4-20250514",
-                max_tokens=2000,
-                messages=[{
-                    "role": "user",
-                    "content": [
-                        {
-                            "type": "image",
-                            "source": {
-                                "type": "base64",
-                                "media_type": "image/png",
-                                "data": image_base64
-                            }
-                        },
-                        {
-                            "type": "text",
-                            "text": """Проанализируй этот график отключений электричества. 
-                            
-На графике показаны часовые интервалы (00-01, 01-02, 02-03 и т.д. до 23-24).
-Под каждым часом есть ячейка, которая может быть:
-- Полностью зачеркнута (⚡❌) = света НЕ будет весь час
-- Зачеркнута только верхняя половина = света НЕ будет первые 30 минут
-- Зачеркнута только нижняя половина = света НЕ будет вторые 30 минут  
-- Пустая (⚡ без зачеркивания) = свет БУДЕТ весь час
-
-Верни результат СТРОГО в JSON формате (без markdown кодблоков):
-{
-  "hours": [
-    {"hour": "00-01", "status": "on/off/half_first/half_second"},
-    {"hour": "01-02", "status": "on/off/half_first/half_second"},
-    ...
-  ]
-}
-
-где status:
-- "on" = свет будет
-- "off" = света не будет весь час
-- "half_first" = света не будет 00:00-00:30
-- "half_second" = света не будет 00:30-01:00"""
-                        }
-                    ]
-                }]
-            )
-            
-            # Извлекаем текст ответа
-            result_text = response.content[0].text.strip()
-            
-            # Убираем возможные markdown обертки
-            if result_text.startswith('```'):
-                result_text = result_text.split('```')[1]
-                if result_text.startswith('json'):
-                    result_text = result_text[4:]
-            
-            # Парсим JSON
-            schedule_data = json.loads(result_text)
-            print(f"✅ График успешно проанализирован: {len(schedule_data.get('hours', []))} часов")
-            
-            return schedule_data
-            
-        except Exception as e:
-            print(f"⚠️ Ошибка анализа изображения: {e}")
-            import traceback
-            traceback.print_exc()
-            return None
-    
-    def format_schedule_analysis(self, schedule_data):
-        """Форматирует результаты анализа графика в читаемый текст"""
-        if not schedule_data or 'hours' not in schedule_data:
-            return "Не вдалося проаналізувати графік"
-        
-        # Группируем периоды отключений
-        outages = []
-        current_outage = None
-        
-        for hour_info in schedule_data['hours']:
-            hour = hour_info['hour']
-            status = hour_info['status']
-            
-            if status == 'off':
-                # Полное отключение на час
-                if current_outage is None:
-                    current_outage = {'start': hour.split('-')[0], 'end': hour.split('-')[1]}
-                else:
-                    current_outage['end'] = hour.split('-')[1]
-            else:
-                if current_outage:
-                    outages.append(f"{current_outage['start']}:00 - {current_outage['end']}:00")
-                    current_outage = None
-                
-                # Частичные отключения
-                if status == 'half_first':
-                    start_h = hour.split('-')[0]
-                    outages.append(f"{start_h}:00 - {start_h}:30")
-                elif status == 'half_second':
-                    start_h = hour.split('-')[0]
-                    outages.append(f"{start_h}:30 - {int(start_h)+1:02d}:00")
-        
-        # Закрываем последний период если есть
-        if current_outage:
-            outages.append(f"{current_outage['start']}:00 - {current_outage['end']}:00")
-        
-        if not outages:
-            return "✅ Відключень не заплановано!"
-        
-        result = "⚡ **Заплановані відключення:**\n"
-        for period in outages:
-            result += f"• {period}\n"
-        
-        return result
-
     async def make_screenshots(self):
-        """Делает скриншоты и анализирует график - обновленная версия"""
+        """Робить скріншоти з парсингом графіка"""
         try:
-            # Агрессивно закрываем все модальные окна
             await self._close_survey_if_present()
             await asyncio.sleep(0.5)
-            await self._close_survey_if_present()
             
-            print("Делаю скриншот основного графика...")
-            screenshot_main = await asyncio.wait_for(
-                self.page.screenshot(full_page=True, type='png'),
-                timeout=30
-            )
-            screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=380, bottom_crop=520)
-            print("✅ Скриншот основного графика готов")
+            # СЬОГОДНІ
+            print("\n" + "="*50)
+            print("📊 ПАРСИНГ ГРАФІКА НА СЬОГОДНІ")
+            print("="*50)
             
-            # Анализируем график
-            print("🔍 Анализирую график отключений...")
-            schedule_analysis = await self.analyze_schedule_image(screenshot_main_cropped)
-            schedule_text = self.format_schedule_analysis(schedule_analysis)
-            print(f"✅ Анализ завершен:\n{schedule_text}")
+            schedule_today = await self.parse_schedule()
+            screenshot_main = await self.page.screenshot(full_page=True, type='png')
+            screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
             
-            print("Кликаю на второй график (завтра)...")
+            # ЗАВТРА
+            print("\n" + "="*50)
+            print("📊 ПАРСИНГ ГРАФІКА НА ЗАВТРА")
+            print("="*50)
+            
             second_date = None
             screenshot_tomorrow_cropped = None
-            schedule_tomorrow_text = None
+            schedule_tomorrow = None
             
             try:
                 date_selector = self.page.locator('div.date:nth-child(2)')
@@ -1067,63 +1025,44 @@ class DTEKChecker:
                 
                 second_date = await date_selector.text_content()
                 second_date = second_date.strip()
-                print(f"Дата второго графика: {second_date}")
                 
                 await date_selector.click()
-                print("✅ Кликнул на второй график, жду загрузки...")
                 await asyncio.sleep(3)
-                
                 await self._close_survey_if_present()
                 await asyncio.sleep(1)
                 
-                print("Делаю скриншот второго графика...")
-                screenshot_tomorrow = await asyncio.wait_for(
-                    self.page.screenshot(full_page=True, type='png'),
-                    timeout=30
-                )
-                screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=380, bottom_crop=520)
-                print("✅ Скриншот второго графика готов")
+                schedule_tomorrow = await self.parse_schedule()
+                screenshot_tomorrow = await self.page.screenshot(full_page=True, type='png')
+                screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
                 
-                # Анализируем график на завтра
-                print("🔍 Анализирую график на завтра...")
-                schedule_tomorrow_analysis = await self.analyze_schedule_image(screenshot_tomorrow_cropped)
-                schedule_tomorrow_text = self.format_schedule_analysis(schedule_tomorrow_analysis)
-                print(f"✅ Анализ завтра завершен:\n{schedule_tomorrow_text}")
-                
-                print("Возвращаюсь на первый график...")
+                # Повертаємось назад
                 first_date = self.page.locator('div.date:nth-child(1)')
                 await first_date.wait_for(state='visible', timeout=10000)
                 await first_date.click()
                 await asyncio.sleep(2)
-                
                 await self._close_survey_if_present()
                 
-                print(f"✅ Вернулся на первый график")
-                
-            except asyncio.TimeoutError as te:
-                print(f"⚠️ Таймаут при работе со вторым графиком: {te}")
             except Exception as e:
-                print(f"⚠️ Не удалось получить второй график: {e}")
+                print(f"⚠ Не вдалося отримати графік на завтра: {e}")
             
             return {
                 'screenshot_main': screenshot_main_cropped,
                 'screenshot_tomorrow': screenshot_tomorrow_cropped,
                 'update_date': self.last_update_date,
                 'second_date': second_date,
-                'schedule_analysis': schedule_text,
-                'schedule_tomorrow_analysis': schedule_tomorrow_text,
+                'schedule_today': schedule_today,
+                'schedule_tomorrow': schedule_tomorrow,
                 'timestamp': datetime.now().isoformat()
             }
             
         except Exception as e:
-            print(f"✘ Ошибка при создании скриншотов: {e}")
+            print(f"✖️ Помилка при створенні скріншотів: {e}")
             import traceback
             traceback.print_exc()
             raise
-       
 
     async def close_browser(self):
-        """Закрытие браузера"""
+        """Закриття браузера"""
         if self.page:
             await self.page.close()
         if self.context:
@@ -1136,100 +1075,114 @@ class DTEKChecker:
 checker = DTEKChecker()
 
 async def get_last_check():
-    """Получает данные последней проверки из БД"""
+    """Отримує дані останньої перевірки з БД"""
     try:
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow(
-                'SELECT update_date, created_at FROM dtek_checks ORDER BY created_at DESC LIMIT 1'
+                'SELECT update_date, schedule_hash, schedule_data, created_at FROM dtek_checks ORDER BY created_at DESC LIMIT 1'
             )
             if row:
-                return {'update_date': row['update_date'], 'created_at': row['created_at']}
+                return {
+                    'update_date': row['update_date'],
+                    'schedule_hash': row['schedule_hash'],
+                    'schedule_data': row['schedule_data'],
+                    'created_at': row['created_at']
+                }
     except Exception as e:
-        print(f"Ошибка при получении данных из БД: {e}")
+        print(f"Помилка при отриманні даних з БД: {e}")
     return None
 
-async def save_check(update_date):
-    """Сохраняет данные проверки в БД"""
+async def save_check(update_date, schedule_hash, schedule_data):
+    """Зберігає дані перевірки в БД"""
     try:
         async with db_pool.acquire() as conn:
             await conn.execute(
-                'INSERT INTO dtek_checks (update_date, created_at) VALUES ($1, $2)',
-                update_date, datetime.now()
+                'INSERT INTO dtek_checks (update_date, schedule_hash, schedule_data, created_at) VALUES ($1, $2, $3, $4)',
+                update_date, schedule_hash, json.dumps(schedule_data), datetime.now()
             )
-        print(f"✓ Данные сохранены в БД: {update_date}")
+        print(f"✓ Дані збережено в БД")
     except Exception as e:
-        print(f"❌ Ошибка при сохранении в БД: {e}")
+        print(f"✖️ Помилка при збереженні в БД: {e}")
 
 @bot.event
 async def on_ready():
-    print(f'✓ {bot.user} подключен к Discord!')
-    print(f'✓ Мониторинг канала: {CHANNEL_ID}')
-    print(f'✓ Интервал проверки: каждые 5 минут')
-    print(f'🌐 Веб-интерфейс для прохождения капчи запущен на порту {PORT}')
-    print(f'🥷 STEALTH MODE активирован')
+    print(f'✓ {bot.user} підключено до Discord!')
+    print(f'✓ Моніторинг каналу: {CHANNEL_ID}')
+    print(f'✓ Інтервал перевірки: кожні 5 хвилин')
+    print(f'🌐 Веб-інтерфейс для проходження капчі запущено на порту {PORT}')
+    print(f'🥷 STEALTH MODE активовано')
     await init_db_pool()
     await start_web_server()
     
-    # НЕ инициализируем браузер автоматически - пользователь сделает это через веб-интерфейс
-    print("💡 Откройте веб-интерфейс и нажмите 'Инициализировать браузер'")
+    print("💡 Відкрийте веб-інтерфейс і натисніть 'Ініціалізувати браузер'")
     print(f"🌐 URL: http://localhost:{PORT}")
-    print("🎉 Бот готов к работе!")
+    print("🎉 Бот готовий до роботи!")
     
     check_schedule.start()
 
 @tasks.loop(minutes=5)
 async def check_schedule():
-    """Периодическая проверка каждые 5 минут"""
+    """Періодична перевірка кожні 5 хвилин"""
     channel = None
     try:
         if not checker.browser or not checker.page:
-            print("⏭️ Браузер не инициализирован, пропускаю проверку")
+            print("⏸️ Браузер не ініціалізовано, пропускаю перевірку")
             return
         
         channel = bot.get_channel(CHANNEL_ID)
         if not channel:
-            print(f"✘ Канал {CHANNEL_ID} не найден!")
+            print(f"✖️ Канал {CHANNEL_ID} не знайдено!")
             return
         
         print(f"\n{'='*50}")
-        print(f"[{datetime.now()}] Запуск автоматической проверки...")
+        print(f"[{datetime.now()}] Запуск автоматичної перевірки...")
         print(f"{'='*50}")
         
         has_update = await checker.check_for_update()
         
         if not has_update:
-            print(f"ℹ️ Без изменений")
+            print(f"ℹ️ Без змін (дата не оновилась)")
             print(f"{'='*50}\n")
             return
         
+        # Дата оновилась - робимо скріншоти і парсимо
         result = await asyncio.wait_for(checker.make_screenshots(), timeout=180)
-        await save_check(result['update_date'])
         
+        # Перевіряємо чи змінився графік
+        schedule_today = result.get('schedule_today')
+        current_hash = checker._calculate_schedule_hash(schedule_today)
+        
+        last_check = await get_last_check()
+        
+        if last_check and last_check['schedule_hash'] == current_hash:
+            print("⏸️ Графік не змінився (тільки дата оновилась)")
+            print(f"{'='*50}\n")
+            return
+        
+        # Графік змінився - відправляємо!
+        print("✅ Графік змінився - відправляю!")
+        
+        # Зберігаємо в БД
+        await save_check(result['update_date'], current_hash, schedule_today)
+        
+        # Відправляємо СЬОГОДНІ
         embed = discord.Embed(
             title="⚡ Графік відключень ДТЕК Київські регіональні електромережі",
             description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
-            color=discord.Color.orange(),
+            color=discord.Color.gold(),
             timestamp=datetime.now()
         )
         
         if result['update_date']:
             embed.add_field(
-                name="🕐 Дата оновлення на сайті",
+                name="📅 Дата оновлення на сайті",
                 value=f"`{result['update_date']}`",
-                inline=False
-            )
-        
-        # Добавляем анализ графика
-        if result.get('schedule_analysis'):
-            embed.add_field(
-                name="📊 Аналіз графіка відключень",
-                value=result['schedule_analysis'],
                 inline=False
             )
         
         embed.add_field(
             name="✅ Статус",
-            value="**🔔 ІНФОРМАЦІЯ ОНОВИЛАСЬ!**",
+            value="**📢 ІНФОРМАЦІЯ ОНОВИЛАСЬ!**",
             inline=False
         )
         embed.set_footer(text="Нова інформація • Автоматична перевірка")
@@ -1242,48 +1195,50 @@ async def check_schedule():
         
         await channel.send(embed=embed, file=file_main)
         
-        if result['screenshot_tomorrow']:
-            embed_tomorrow = discord.Embed(
-                title="📅 Графік відключень на завтра",
-                description=f"**📍 Адреса:** с. Книжичі, вул. Київська, 168\n**📆 Дата:** {result['second_date'] or 'Завтра'}",
-                color=discord.Color.blue(),
-                timestamp=datetime.now()
-            )
+        # Перевіряємо ЗАВТРА
+        schedule_tomorrow = result.get('schedule_tomorrow')
+        if schedule_tomorrow and result.get('screenshot_tomorrow'):
+            # Перевіряємо чи є відключення
+            has_outages = checker._has_any_outages(schedule_tomorrow)
             
-            # Добавляем анализ графика на завтра
-            if result.get('schedule_tomorrow_analysis'):
-                embed_tomorrow.add_field(
-                    name="📊 Аналіз графіка відключень",
-                    value=result['schedule_tomorrow_analysis'],
-                    inline=False
+            if has_outages:
+                print("✅ Завтра є відключення - відправляю графік")
+                
+                embed_tomorrow = discord.Embed(
+                    title="📅 Графік відключень на завтра",
+                    description=f"**📍 Адреса:** с. Книжичі, вул. Київська, 168\n**📆 Дата:** {result['second_date'] or 'Завтра'}",
+                    color=discord.Color.blue(),
+                    timestamp=datetime.now()
                 )
-            
-            file_tomorrow = discord.File(
-                io.BytesIO(result['screenshot_tomorrow']), 
-                filename=f"dtek_tomorrow_{timestamp_str}.png"
-            )
-            
-            await channel.send(embed=embed_tomorrow, file=file_tomorrow)
+                
+                file_tomorrow = discord.File(
+                    io.BytesIO(result['screenshot_tomorrow']), 
+                    filename=f"dtek_tomorrow_{timestamp_str}.png"
+                )
+                
+                await channel.send(embed=embed_tomorrow, file=file_tomorrow)
+            else:
+                print("⏸️ Завтра немає відключень - не відправляю")
         
-        print(f"✅ Сообщение отправлено в Discord")
+        print(f"✓ Повідомлення відправлено в Discord")
         print(f"{'='*50}\n")
         
     except asyncio.TimeoutError:
-        print(f"⏱️ ТАЙМАУТ: Операция заняла больше 3 минут")
+        print(f"⏱️ ТАЙМАУТ: Операція зайняла більше 3 хвилин")
         print(f"{'='*50}\n")
         if channel:
             try:
                 error_embed = discord.Embed(
                     title="⏱️ Таймаут операції",
                     description="Перевірка зайняла більше 3 хвилин. Можливо, сайт повільно завантажується.",
-                    color=discord.Color.orange(),
+                    color=discord.Color.dark_gray(),
                     timestamp=datetime.now()
                 )
                 await channel.send(embed=error_embed)
             except:
                 pass
     except Exception as e:
-        print(f"✘ Ошибка в check_schedule: {e}")
+        print(f"✖️ Помилка в check_schedule: {e}")
         import traceback
         traceback.print_exc()
         
@@ -1292,7 +1247,7 @@ async def check_schedule():
                 error_embed = discord.Embed(
                     title="⚠️ Помилка перевірки",
                     description=f"Не вдалося виконати перевірку.\n```{str(e)[:200]}```",
-                    color=discord.Color.red(),
+                    color=discord.Color.dark_red(),
                     timestamp=datetime.now()
                 )
                 await channel.send(embed=error_embed)
@@ -1301,23 +1256,29 @@ async def check_schedule():
 
 @check_schedule.before_loop
 async def before_check_schedule():
-    """Ждем, пока бот будет готов"""
+    """Чекаємо, поки бот буде готовий"""
     await bot.wait_until_ready()
-    print("⏳ Ожидание готовности бота...")
+    print("⏳ Очікування готовності бота...")
 
 @bot.command(name='check')
 async def manual_check(ctx):
-    """Ручная проверка по команде !check"""
+    """Ручна перевірка по команді !check"""
     if not checker.browser or not checker.page:
-        await ctx.send("✘ Браузер не ініціалізовано. Відкрийте веб-інтерфейс та натисніть 'Ініціалізувати браузер'")
+        await ctx.send("✖️ Браузер не ініціалізовано. Відкрийте веб-інтерфейс та натисніть 'Ініціалізувати браузер'")
         return
     
     await ctx.send("⏳ Починаю перевірку графіка відключень...")
     
     try:
         result = await asyncio.wait_for(checker.make_screenshots(), timeout=180)
-        await save_check(result['update_date'])
         
+        # Перевіряємо чи змінився графік
+        schedule_today = result.get('schedule_today')
+        current_hash = checker._calculate_schedule_hash(schedule_today)
+        
+        await save_check(result['update_date'], current_hash, schedule_today)
+        
+        # Відправляємо СЬОГОДНІ
         embed = discord.Embed(
             title="⚡ Графік відключень ДТЕК (Ручна перевірка)",
             description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
@@ -1327,16 +1288,8 @@ async def manual_check(ctx):
         
         if result['update_date']:
             embed.add_field(
-                name="🕐 Дата оновлення на сайті",
+                name="📅 Дата оновлення на сайті",
                 value=f"`{result['update_date']}`",
-                inline=False
-            )
-        
-        # Добавляем анализ графика
-        if result.get('schedule_analysis'):
-            embed.add_field(
-                name="📊 Аналіз графіка відключень",
-                value=result['schedule_analysis'],
                 inline=False
             )
         
@@ -1350,47 +1303,44 @@ async def manual_check(ctx):
         
         await ctx.send(embed=embed, file=file_main)
         
-        if result['screenshot_tomorrow']:
-            embed_tomorrow = discord.Embed(
-                title="📅 Графік відключень на завтра",
-                description=f"**📍 Адреса:** с. Книжичі, вул. Київська, 168\n**📆 Дата:** {result['second_date'] or 'Завтра'}",
-                color=discord.Color.blue(),
-                timestamp=datetime.now()
-            )
+        # Перевіряємо ЗАВТРА
+        schedule_tomorrow = result.get('schedule_tomorrow')
+        if schedule_tomorrow and result.get('screenshot_tomorrow'):
+            has_outages = checker._has_any_outages(schedule_tomorrow)
             
-            # Добавляем анализ графика на завтра
-            if result.get('schedule_tomorrow_analysis'):
-                embed_tomorrow.add_field(
-                    name="📊 Аналіз графіка відключень",
-                    value=result['schedule_tomorrow_analysis'],
-                    inline=False
+            if has_outages:
+                embed_tomorrow = discord.Embed(
+                    title="📅 Графік відключень на завтра",
+                    description=f"**📍 Адреса:** с. Книжичі, вул. Київська, 168\n**📆 Дата:** {result['second_date'] or 'Завтра'}",
+                    color=discord.Color.blue(),
+                    timestamp=datetime.now()
                 )
-            
-            file_tomorrow = discord.File(
-                io.BytesIO(result['screenshot_tomorrow']), 
-                filename=f"dtek_manual_tomorrow_{timestamp_str}.png"
-            )
-            
-            await ctx.send(embed=embed_tomorrow, file=file_tomorrow)
+                
+                file_tomorrow = discord.File(
+                    io.BytesIO(result['screenshot_tomorrow']), 
+                    filename=f"dtek_manual_tomorrow_{timestamp_str}.png"
+                )
+                
+                await ctx.send(embed=embed_tomorrow, file=file_tomorrow)
         
     except asyncio.TimeoutError:
         error_embed = discord.Embed(
             title="⏱️ Таймаут",
             description="Перевірка зайняла більше 3 хвилин.",
-            color=discord.Color.orange()
+            color=discord.Color.dark_gray()
         )
         await ctx.send(embed=error_embed)
     except Exception as e:
         error_embed = discord.Embed(
-            title="✘ Помилка",
+            title="✖️ Помилка",
             description=f"```{str(e)[:500]}```",
-            color=discord.Color.red()
+            color=discord.Color.dark_red()
         )
         await ctx.send(embed=error_embed)
 
 @bot.command(name='info')
 async def bot_info(ctx):
-    """Информация о боте"""
+    """Інформація про бота"""
     embed = discord.Embed(
         title="ℹ️ Інформація про бота",
         description="Бот для автоматичного моніторингу графіків відключень ДТЕК",
@@ -1409,14 +1359,14 @@ async def bot_info(ctx):
         inline=True
     )
     
-    browser_status = "✅ Відкритий" if checker.browser else "❌ Закритий"
+    browser_status = "✅ Відкритий" if checker.browser else "✖️ Закритий"
     embed.add_field(
         name="🌐 Статус браузера",
         value=browser_status,
         inline=True
     )
     
-    cookies_status = "✅ Збережено" if os.path.exists(checker.cookies_file) else "❌ Відсутні"
+    cookies_status = "✅ Збережено" if os.path.exists(checker.cookies_file) else "✖️ Відсутні"
     embed.add_field(
         name="🍪 Куки",
         value=cookies_status,
@@ -1425,7 +1375,7 @@ async def bot_info(ctx):
     
     if checker.last_update_date:
         embed.add_field(
-            name="🕐 Остання дата на сайті",
+            name="📅 Остання дата на сайті",
             value=f"`{checker.last_update_date}`",
             inline=False
         )
@@ -1437,7 +1387,7 @@ async def bot_info(ctx):
     )
     
     embed.add_field(
-        name="📝 Команди",
+        name="📋 Команди",
         value="`!check` - Ручна перевірка\n`!info` - Інформація\n`!status` - Детальний статус\n`!stop` - Зупинити (адміни)",
         inline=False
     )
@@ -1446,25 +1396,25 @@ async def bot_info(ctx):
 
 @bot.command(name='status')
 async def bot_status(ctx):
-    """Детальный статус бота"""
+    """Детальний статус бота"""
     embed = discord.Embed(
-        title="🔍 Детальний статус бота",
+        title="📊 Детальний статус бота",
         color=discord.Color.purple(),
         timestamp=datetime.now()
     )
     
-    playwright_status = "✅ Запущен" if checker.playwright else "❌ Не запущен"
-    browser_status = "✅ Открыт" if checker.browser else "❌ Закрыт"
-    page_status = "✅ Загружена" if checker.page else "❌ Не загружена"
+    playwright_status = "✅ Запущено" if checker.playwright else "✖️ Не запущено"
+    browser_status = "✅ Відкрито" if checker.browser else "✖️ Закрито"
+    page_status = "✅ Завантажено" if checker.page else "✖️ Не завантажено"
     
     embed.add_field(name="Playwright", value=playwright_status, inline=True)
     embed.add_field(name="Browser", value=browser_status, inline=True)
     embed.add_field(name="Page", value=page_status, inline=True)
     
-    db_status = "✅ Підключено" if db_pool else "❌ Не підключено"
+    db_status = "✅ Підключено" if db_pool else "✖️ Не підключено"
     embed.add_field(name="База даних", value=db_status, inline=False)
     
-    task_status = "✅ Запущено" if check_schedule.is_running() else "❌ Зупинено"
+    task_status = "✅ Запущено" if check_schedule.is_running() else "✖️ Зупинено"
     embed.add_field(name="Автоматична перевірка", value=task_status, inline=False)
     
     if checker.last_update_date:
@@ -1488,9 +1438,9 @@ async def stop_bot(ctx):
 
 if __name__ == '__main__':
     try:
-        print("🤖 Запуск Discord бота DTEK с веб-интерфейсом...")
+        print("🤖 Запуск Discord бота DTEK з веб-інтерфейсом...")
         print(f"📅 Дата: {datetime.now()}")
-        print("🌐 Веб-интерфейс для управления браузером включен")
+        print("🌐 Веб-інтерфейс для управління браузером включено")
         bot.run(DISCORD_TOKEN)
     except KeyboardInterrupt:
         print("\n🛑 Остановка бота...")
