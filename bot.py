@@ -37,6 +37,8 @@ async def init_db_pool():
             max_size=10,
             command_timeout=60
         )
+        print("✓ Database pool створено")
+        
         # Створюємо таблицю якщо не існує
         async with db_pool.acquire() as conn:
             await conn.execute('''
@@ -44,17 +46,18 @@ async def init_db_pool():
                     id SERIAL PRIMARY KEY,
                     update_date TEXT,
                     schedule_hash TEXT,
-                    created_at TIMESTAMP
+                    schedule_data JSONB,
+                    created_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
-        print("✅ Database pool створено")
+        print("✓ Таблиця БД готова")
 
 async def close_db_pool():
     """Закриття connection pool"""
     global db_pool
     if db_pool:
         await db_pool.close()
-        print("✅ Database pool закрито")
+        print("✓ Database pool закрито")
 
 # HTTP сервер для Render health checks + VNC interface
 async def handle_health(request):
@@ -271,7 +274,7 @@ async def handle_root(request):
                 <h3>📖 Як використовувати:</h3>
                 <ul>
                     <li><strong>Клікайте по скріншоту</strong> - кліки передаються в браузер бота</li>
-                    <li><strong>Оновити скріншот</strong> - получить актуальне зображення</li>
+                    <li><strong>Оновити скріншот</strong> - получити актуальне зображення</li>
                     <li><strong>Пройти капчу</strong> - клікайте по елементам капчі прямо на скріншоті</li>
                     <li>Скріншоти оновлюються автоматично кожні 3 секунди</li>
                 </ul>
@@ -282,13 +285,13 @@ async def handle_root(request):
                 <div class="buttons">
                     <button class="btn-primary" onclick="refreshScreenshot()">🔄 Оновити скріншот</button>
                     <button class="btn-success" onclick="initBrowser()">🚀 Ініціалізувати браузер</button>
-                    <button class="btn-info" onclick="manualCheck()">✅ Зделать проверку</button>
-                    <button class="btn-danger" onclick="clearCookies()">🍪 Очистить куки</button>
+                    <button class="btn-info" onclick="manualCheck()">✅ Зробити перевірку</button>
+                    <button class="btn-danger" onclick="clearCookies()">🍪 Очистити куки</button>
                 </div>
             </div>
             
             <div class="viewer">
-                <h2>👁️ Удаленный просмотр браузера</h2>
+                <h2>👁️ Віддалений просмотр браузера</h2>
                 <div class="screenshot-container">
                     <div class="loading" id="loading">
                         <div class="spinner"></div>
@@ -307,7 +310,7 @@ async def handle_root(request):
                         <p id="browser-status">-</p>
                     </div>
                     <div class="info-card">
-                        <h3>Последняя дата</h3>
+                        <h3>Последня дата</h3>
                         <p id="last-update">-</p>
                     </div>
                     <div class="info-card">
@@ -315,7 +318,7 @@ async def handle_root(request):
                         <p id="cookies-status">-</p>
                     </div>
                     <div class="info-card">
-                        <h3>Последнее обновление</h3>
+                        <h3>Последнє оновлення</h3>
                         <p id="last-refresh">-</p>
                     </div>
                 </div>
@@ -371,7 +374,7 @@ async def handle_root(request):
             }
             
             async function manualCheck() {
-                document.getElementById('status').textContent = '⏳ Проверка...';
+                document.getElementById('status').textContent = '⏳ Перевірка...';
                 try {
                     const data = await request('/api/check');
                     alert(data.message);
@@ -462,7 +465,7 @@ async def handle_root(request):
     return web.Response(text=html, content_type='text/html')
 
 async def handle_screenshot(request):
-    """API: Получить скриншот браузера"""
+    """API: Получити скріншот браузера"""
     try:
         if not checker.page:
             return web.json_response({'error': 'Browser not initialized'}, status=400)
@@ -478,7 +481,7 @@ async def handle_screenshot(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def handle_click(request):
-    """API: Передать клик в браузер"""
+    """API: Передати клік в браузер"""
     try:
         if not checker.page:
             return web.json_response({'error': 'Browser not initialized'}, status=400)
@@ -498,7 +501,7 @@ async def handle_click(request):
         return web.json_response({'error': str(e)}, status=500)
 
 async def handle_init(request):
-    """API: Инициализировать браузер"""
+    """API: Ініціалізувати браузер"""
     try:
         await checker.init_browser()
         return web.json_response({
@@ -512,7 +515,7 @@ async def handle_init(request):
         }, status=500)
 
 async def handle_check(request):
-    """API: Выполнить проверку"""
+    """API: Виконати перевірку"""
     try:
         result = await checker.make_screenshots()
         return web.json_response({
@@ -527,7 +530,7 @@ async def handle_check(request):
         }, status=500)
 
 async def handle_clear_cookies(request):
-    """API: Очистить куки"""
+    """API: Очистити куки"""
     try:
         if os.path.exists(checker.cookies_file):
             os.remove(checker.cookies_file)
@@ -542,15 +545,16 @@ async def handle_clear_cookies(request):
         }, status=500)
 
 async def handle_status(request):
-    """API: Получить статус бота"""
-    browser_status = "✅ Відкритий" if checker.browser else "❌ Закритий"
-    cookies_status = "✅ Є" if os.path.exists(checker.cookies_file) else "❌ Немає"
+    """API: Получити статус бота"""
+    browser_status = "✅ Відкритий" if checker.browser else "✖️ Закритий"
+    cookies_status = "✅ Є" if os.path.exists(checker.cookies_file) else "✖️ Немає"
     
     return web.json_response({
         'browser': browser_status,
         'last_update': checker.last_update_date,
         'cookies': cookies_status
     })
+
 
 async def start_web_server():
     """Запуск веб-сервера з VNC інтерфейсом"""
@@ -692,12 +696,16 @@ class DTEKChecker:
             await self._save_cookies()
     
     async def _close_survey_if_present(self):
-        """Закриває опрос якщо він з'явився"""
+        """Закриває опрос якщо він з'явився - покращена версія"""
         try:
+            # 1. Пробуємо знайти модальне вікно по паттерну з будь-яким номером
+            # Використовуємо JavaScript для пошуку елемента з відповідним ID
             modal_found = await self.page.evaluate("""
                 () => {
+                    // Шукаємо всі елементи з ID що починається на modal-questionnaire-welcome-
                     const modals = document.querySelectorAll('[id^="modal-questionnaire-welcome-"]');
                     for (const modal of modals) {
+                        // Перевіряємо видимість модального вікна
                         const style = window.getComputedStyle(modal);
                         if (style.display !== 'none' && style.visibility !== 'hidden') {
                             return modal.id;
@@ -709,6 +717,8 @@ class DTEKChecker:
             
             if modal_found:
                 print(f"✓ Знайдено модальне вікно опросу: {modal_found}")
+                
+                # Пробуємо закрити через специфічний селектор
                 close_selector = f"#{modal_found} .modal__close"
                 close_btn = self.page.locator(close_selector)
                 
@@ -718,6 +728,7 @@ class DTEKChecker:
                     print(f"✓ Опрос закрито через селектор: {close_selector}")
                     return True
             
+            # 2. Додаткова перевірка - шукаємо кнопку закриття по загальним селекторам
             generic_selectors = [
                 '.modal__close',
                 'button.modal__close',
@@ -734,7 +745,9 @@ class DTEKChecker:
                     print(f"✓ Опрос закрито через загальний селектор: {selector}")
                     return True
             
+            # 3. Альтернативний метод - пошук через текст кнопки
             try:
+                # Шукаємо кнопку з хрестиком або текстом закриття
                 close_by_text = self.page.locator('button:has-text("×"), button:has-text("✕")')
                 if await close_by_text.count() > 0:
                     first_close = close_by_text.first
@@ -746,6 +759,7 @@ class DTEKChecker:
             except:
                 pass
             
+            print("⚪ Модальне вікно опросу не знайдено")
             return False
                     
         except Exception as e:
@@ -755,6 +769,7 @@ class DTEKChecker:
     async def _wait_and_close_survey(self, timeout=3):
         """Чекає появи опросу і закриває його"""
         try:
+            # Чекаємо трохи і перевіряємо декілька раз
             for i in range(timeout):
                 if await self._close_survey_if_present():
                     return True
@@ -764,11 +779,12 @@ class DTEKChecker:
             return False
 
     async def _setup_page(self):
-        """Налаштування сторінки"""
+        """Налаштування сторінки - обновлена версія"""
         print("Налаштування сторінки...")
         await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='networkidle', timeout=60000)
         await self._random_delay(3000, 5000)
         
+        # Закриваємо опрос одразу після завантаження
         await self._wait_and_close_survey(timeout=3)
         
         try:
@@ -777,6 +793,7 @@ class DTEKChecker:
                 print("⚠️ Виявлено капчу! Використовуйте веб-інтерфейс.")
                 for i in range(300):
                     await asyncio.sleep(1)
+                    # Перевіряємо опрос кожні 10 секунд під час очікування капчі
                     if i % 10 == 0:
                         await self._close_survey_if_present()
                     if await captcha_checkbox.count() == 0:
@@ -787,6 +804,8 @@ class DTEKChecker:
             pass
         
         await self._random_delay(1500, 2500)
+        
+        # Ще раз перевіряємо опрос перед початком роботи
         await self._close_survey_if_present()
         
         try:
@@ -796,6 +815,7 @@ class DTEKChecker:
         except:
             pass
         
+        # Решта коду заповнення форми залишається без змін...
         city_input = self.page.locator('.discon-input-wrapper #city')
         await city_input.wait_for(state='visible', timeout=10000)
         await self._human_move_and_click(city_input)
@@ -832,6 +852,7 @@ class DTEKChecker:
         await self._human_move_and_click(house_option)
         await self._random_delay(2500, 3500)
         
+        # Фінальна перевірка опросу
         await self._close_survey_if_present()
         
         try:
@@ -846,8 +867,9 @@ class DTEKChecker:
         print("✅ Сторінка налаштована!")
 
     async def check_for_update(self):
-        """Перевіряє чи змінилась дата"""
+        """Перевіряє чи змінилась дата - оновлена версія"""
         try:
+            # Закриваємо опрос ПЕРЕД перевіркою
             await self._close_survey_if_present()
             
             if random.random() < 0.3:
@@ -873,18 +895,6 @@ class DTEKChecker:
     async def parse_schedule(self):
         """
         Парсить графік відключень з активної вкладки
-        
-        Повертає:
-        {
-            'date': 'дата графіка',
-            'hours': список годин,
-            'schedule': {
-                'hour': {
-                    'status': 'powered'|'scheduled'|'first-half'|'second-half',
-                    'class': 'клас елемента'
-                }
-            }
-        }
         """
         try:
             date_elem = self.page.locator('.date.active')
@@ -924,9 +934,9 @@ class DTEKChecker:
                     elif 'cell-non-scheduled' in cell_class:
                         status = 'powered'  # Світло є
                     elif 'cell-first-half' in cell_class:
-                        status = 'first-half'  # Перші 30 хв
+                        status = 'first-half'  # Перші 30 хв відключення
                     elif 'cell-second-half' in cell_class:
-                        status = 'second-half'  # Другі 30 хв
+                        status = 'second-half'  # Другі 30 хв відключення
                     else:
                         status = 'powered'  # За замовчуванням - світло є
                     
@@ -972,6 +982,42 @@ class DTEKChecker:
                 return True
         
         return False
+
+    def _compare_schedules(self, old_schedule, new_schedule):
+        """
+        Порівнює два графіки і повертає текстовий опис змін
+        """
+        if not old_schedule or not new_schedule:
+            return "📊 Перша перевірка - немає з чим порівнювати"
+        
+        changes = []
+        added_outages = []  # Години де з'явились відключення
+        removed_outages = []  # Години де відключення зникли
+        
+        # Порівнюємо кожну годину
+        for hour in new_schedule['schedule'].keys():
+            old_status = old_schedule['schedule'].get(hour, {}).get('status', 'unknown')
+            new_status = new_schedule['schedule'][hour]['status']
+            
+            # Перевіряємо зміни
+            if old_status in ['powered'] and new_status in ['scheduled', 'first-half', 'second-half']:
+                # Відключення додалось
+                added_outages.append(hour)
+            elif old_status in ['scheduled', 'first-half', 'second-half'] and new_status in ['powered']:
+                # Відключення прибралось
+                removed_outages.append(hour)
+        
+        # Формуємо текст
+        if not added_outages and not removed_outages:
+            return None  # Немає змін
+        
+        if added_outages:
+            changes.append(f"⚡ **Додалось відключення:** {', '.join(added_outages)}")
+        
+        if removed_outages:
+            changes.append(f"✅ **З'явилось світло:** {', '.join(removed_outages)}")
+        
+        return "\n".join(changes)
 
     def crop_screenshot(self, screenshot_bytes, top_crop=300, bottom_crop=400, left_crop=0, right_crop=0):
         """Обрізає скріншот"""
@@ -1025,25 +1071,38 @@ class DTEKChecker:
                 
                 second_date = await date_selector.text_content()
                 second_date = second_date.strip()
+                print(f"Дата другого графіка: {second_date}")
                 
                 await date_selector.click()
+                print("✓ Клікнув на другий графік, чекаю завантаження...")
                 await asyncio.sleep(3)
+                
+                # Закриваємо опрос який міг з'явитись після переключення
                 await self._close_survey_if_present()
                 await asyncio.sleep(1)
                 
+                print("Роблю скріншот другого графіка...")
                 schedule_tomorrow = await self.parse_schedule()
                 screenshot_tomorrow = await self.page.screenshot(full_page=True, type='png')
                 screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
+                print("✓ Скріншот другого графіка готовий")
                 
                 # Повертаємось назад
+                print("Повертаюсь на перший графік...")
                 first_date = self.page.locator('div.date:nth-child(1)')
                 await first_date.wait_for(state='visible', timeout=10000)
                 await first_date.click()
                 await asyncio.sleep(2)
+                
+                # Закриваємо опрос після повернення на перший графік
                 await self._close_survey_if_present()
                 
+                print(f"✓ Повернувся на перший графік")
+                
+            except asyncio.TimeoutError as te:
+                print(f"⚠ Таймаут при роботі зі другим графіком: {te}")
             except Exception as e:
-                print(f"⚠ Не вдалося отримати графік на завтра: {e}")
+                print(f"⚠ Не вдалося отримати другий графік: {e}")
             
             return {
                 'screenshot_main': screenshot_main_cropped,
@@ -1154,10 +1213,16 @@ async def check_schedule():
         
         last_check = await get_last_check()
         
+        # Порівнюємо графіки
+        changes_text = None
         if last_check and last_check['schedule_hash'] == current_hash:
             print("⏸️ Графік не змінився (тільки дата оновилась)")
             print(f"{'='*50}\n")
             return
+        elif last_check and last_check.get('schedule_data'):
+            # Є попередній графік - порівнюємо
+            old_schedule = last_check['schedule_data']
+            changes_text = checker._compare_schedules(old_schedule, schedule_today)
         
         # Графік змінився - відправляємо!
         print("✅ Графік змінився - відправляю!")
@@ -1180,9 +1245,17 @@ async def check_schedule():
                 inline=False
             )
         
+        # Додаємо опис змін якщо є
+        if changes_text:
+            embed.add_field(
+                name="📊 Що змінилось:",
+                value=changes_text,
+                inline=False
+            )
+        
         embed.add_field(
             name="✅ Статус",
-            value="**📢 ІНФОРМАЦІЯ ОНОВИЛАСЬ!**",
+            value="**📢 ГРАФІК ОНОВЛЕНО!**",
             inline=False
         )
         embed.set_footer(text="Нова інформація • Автоматична перевірка")
@@ -1247,7 +1320,7 @@ async def check_schedule():
                 error_embed = discord.Embed(
                     title="⚠️ Помилка перевірки",
                     description=f"Не вдалося виконати перевірку.\n```{str(e)[:200]}```",
-                    color=discord.Color.dark_red(),
+                    color=discord.Color.dark_gray(),
                     timestamp=datetime.now()
                 )
                 await channel.send(embed=error_embed)
@@ -1276,6 +1349,13 @@ async def manual_check(ctx):
         schedule_today = result.get('schedule_today')
         current_hash = checker._calculate_schedule_hash(schedule_today)
         
+        # Отримуємо попередній графік для порівняння
+        last_check = await get_last_check()
+        changes_text = None
+        if last_check and last_check.get('schedule_data'):
+            old_schedule = last_check['schedule_data']
+            changes_text = checker._compare_schedules(old_schedule, schedule_today)
+        
         await save_check(result['update_date'], current_hash, schedule_today)
         
         # Відправляємо СЬОГОДНІ
@@ -1290,6 +1370,14 @@ async def manual_check(ctx):
             embed.add_field(
                 name="📅 Дата оновлення на сайті",
                 value=f"`{result['update_date']}`",
+                inline=False
+            )
+        
+        # Додаємо опис змін якщо є
+        if changes_text:
+            embed.add_field(
+                name="📊 Що змінилось:",
+                value=changes_text,
                 inline=False
             )
         
@@ -1334,7 +1422,7 @@ async def manual_check(ctx):
         error_embed = discord.Embed(
             title="✖️ Помилка",
             description=f"```{str(e)[:500]}```",
-            color=discord.Color.dark_red()
+            color=discord.Color.dark_gray()
         )
         await ctx.send(embed=error_embed)
 
@@ -1451,3 +1539,4 @@ if __name__ == '__main__':
             asyncio.run(close_db_pool())
         except:
             pass
+        
