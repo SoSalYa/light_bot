@@ -778,7 +778,7 @@ class DTEKChecker:
             return False
 
     async def _setup_page(self):
-        """Налаштування сторінки - виправлена версія з автокомплітом"""
+        """Налаштування сторінки - обновлена версія"""
         print("Налаштування сторінки...")
         await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='networkidle', timeout=60000)
         await self._random_delay(3000, 5000)
@@ -804,7 +804,7 @@ class DTEKChecker:
         
         await self._random_delay(1500, 2500)
         
-        # Закриваємо опрос перед роботою з формами
+        # Ще раз перевіряємо опрос перед початком роботи
         await self._close_survey_if_present()
         
         try:
@@ -814,94 +814,44 @@ class DTEKChecker:
         except:
             pass
         
-        # МІСТО - з додатковими перевірками
-        print("Вводжу місто...")
+        # Решта коду заповнення форми залишається без змін...
         city_input = self.page.locator('.discon-input-wrapper #city')
         await city_input.wait_for(state='visible', timeout=10000)
         await self._human_move_and_click(city_input)
         await city_input.clear()
-        await asyncio.sleep(0.5)  # Додаткова пауза
         await self._human_type(city_input, 'книж')
-        
-        # Чекаємо довше на появу автокомпліту
-        print("Чекаю на автокомпліт міста...")
-        await asyncio.sleep(3)  # Збільшена затримка для автокомпліту
-        
-        # Перевіряємо що список з'явився
-        city_list = self.page.locator('#cityautocomplete-list')
-        try:
-            await city_list.wait_for(state='visible', timeout=5000)
-            print("✓ Автокомпліт міста з'явився")
-        except:
-            print("⚠️ Автокомпліт міста не з'явився, пробую ще раз...")
-            await city_input.click()
-            await asyncio.sleep(2)
+        await self._random_delay(1800, 2500)
         
         city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
         await city_option.wait_for(state='visible', timeout=10000)
         await self._human_move_and_click(city_option)
-        print("✓ Місто вибрано")
         await self._random_delay(1000, 1800)
         
-        # ВУЛИЦЯ - з додатковими перевірками
-        print("Вводжу вулицю...")
         street_input = self.page.locator('.discon-input-wrapper #street')
         await street_input.wait_for(state='visible', timeout=10000)
         await self._human_move_and_click(street_input)
         await street_input.clear()
-        await asyncio.sleep(0.5)  # Додаткова пауза
         await self._human_type(street_input, 'киї')
-        
-        # Чекаємо довше на появу автокомпліту
-        print("Чекаю на автокомпліт вулиці...")
-        await asyncio.sleep(3)  # Збільшена затримка
-        
-        # Перевіряємо що список з'явився
-        street_list = self.page.locator('#streetautocomplete-list')
-        try:
-            await street_list.wait_for(state='visible', timeout=5000)
-            print("✓ Автокомпліт вулиці з'явився")
-        except:
-            print("⚠️ Автокомпліт вулиці не з'явився, пробую ще раз...")
-            await street_input.click()
-            await asyncio.sleep(2)
+        await self._random_delay(1800, 2500)
         
         street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
         await street_option.wait_for(state='visible', timeout=10000)
         await self._human_move_and_click(street_option)
-        print("✓ Вулицю вибрано")
         await self._random_delay(1000, 1800)
         
-        # БУДИНОК - з додатковими перевірками
-        print("Вводжу номер будинку...")
         house_input = self.page.locator('input#house_num')
         await house_input.wait_for(state='visible', timeout=10000)
         await self._human_move_and_click(house_input)
         await house_input.clear()
-        await asyncio.sleep(0.5)  # Додаткова пауза
         await self._human_type(house_input, '168')
-        
-        # Чекаємо довше на появу автокомпліту
-        print("Чекаю на автокомпліт будинку...")
-        await asyncio.sleep(3)  # Збільшена затримка
-        
-        # Перевіряємо що список з'явився
-        house_list = self.page.locator('#house_numautocomplete-list')
-        try:
-            await house_list.wait_for(state='visible', timeout=5000)
-            print("✓ Автокомпліт будинку з'явився")
-        except:
-            print("⚠️ Автокомпліт будинку не з'явився, пробую ще раз...")
-            await house_input.click()
-            await asyncio.sleep(2)
+        await self._random_delay(1800, 2500)
         
         house_option = self.page.locator('#house_numautocomplete-list > div:first-child')
         await house_option.wait_for(state='visible', timeout=10000)
         await self._human_move_and_click(house_option)
-        print("✓ Будинок вибрано")
         await self._random_delay(2500, 3500)
         
-        # Фінальна перевірка опросу (тільки після заповнення форм!)
+        # Фінальна перевірка опросу
         await self._close_survey_if_present()
         
         try:
