@@ -39,28 +39,18 @@ async def init_db_pool():
         )
         print("✓ Database pool створено")
         
-        # Створюємо таблицю якщо не існує з правильною структурою
+        # Створюємо таблицю якщо не існує
         async with db_pool.acquire() as conn:
-            # Видаляємо стару таблицю якщо структура не відповідає
-            await conn.execute('DROP TABLE IF EXISTS dtek_checks CASCADE')
-            
-            # Створюємо нову таблицю з правильними колонками
             await conn.execute('''
-                CREATE TABLE dtek_checks (
+                CREATE TABLE IF NOT EXISTS dtek_checks (
                     id SERIAL PRIMARY KEY,
-                    update_date TEXT NOT NULL,
-                    schedule_hash TEXT NOT NULL,
-                    schedule_data JSONB NOT NULL,
+                    update_date TEXT,
+                    schedule_hash TEXT,
+                    schedule_data JSONB,
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
-            
-            # Створюємо індекс для швидшого пошуку
-            await conn.execute('''
-                CREATE INDEX IF NOT EXISTS idx_dtek_checks_created_at 
-                ON dtek_checks(created_at DESC)
-            ''')
-        print("✓ Таблиця БД створена з правильною структурою")
+        print("✓ Таблиця БД готова")
 
 async def close_db_pool():
     """Закриття connection pool"""
@@ -286,9 +276,7 @@ async def handle_root(request):
                     <li><strong>Клікайте по скріншоту</strong> - кліки передаються в браузер бота</li>
                     <li><strong>Оновити скріншот</strong> - получити актуальне зображення</li>
                     <li><strong>Пройти капчу</strong> - клікайте по елементам капчі прямо на скріншоті</li>
-                    <li><strong>Перезапуск браузера</strong> - оновлює сесію (корисно при помилках)</li>
                     <li>Скріншоти оновлюються автоматично кожні 3 секунди</li>
-                    <li><strong>⏰ Автоматичний перезапуск:</strong> Браузер перезапускається щоночі о 23:58-00:02 для оновлення даних</li>
                 </ul>
             </div>
             
@@ -298,13 +286,12 @@ async def handle_root(request):
                     <button class="btn-primary" onclick="refreshScreenshot()">🔄 Оновити скріншот</button>
                     <button class="btn-success" onclick="initBrowser()">🚀 Ініціалізувати браузер</button>
                     <button class="btn-info" onclick="manualCheck()">✅ Зробити перевірку</button>
-                    <button class="btn-info" onclick="restartBrowser()">🔄 Перезапустити браузер</button>
                     <button class="btn-danger" onclick="clearCookies()">🍪 Очистити куки</button>
                 </div>
             </div>
             
             <div class="viewer">
-                <h2>👁️ Віддалений прогляд браузера</h2>
+                <h2>👁️ Віддалений просмотр браузера</h2>
                 <div class="screenshot-container">
                     <div class="loading" id="loading">
                         <div class="spinner"></div>
@@ -323,7 +310,7 @@ async def handle_root(request):
                         <p id="browser-status">-</p>
                     </div>
                     <div class="info-card">
-                        <h3>Поледня дата</h3>
+                        <h3>Последня дата</h3>
                         <p id="last-update">-</p>
                     </div>
                     <div class="info-card">
@@ -331,12 +318,8 @@ async def handle_root(request):
                         <p id="cookies-status">-</p>
                     </div>
                     <div class="info-card">
-                        <h3>Поледнє оновлення</h3>
+                        <h3>Последнє оновлення</h3>
                         <p id="last-refresh">-</p>
-                    </div>
-                    <div class="info-card">
-                        <h3>⏰ До перезапуску</h3>
-                        <p id="time-to-restart">-</p>
                     </div>
                 </div>
             </div>
@@ -411,22 +394,6 @@ async def handle_root(request):
                 }
             }
             
-            async function restartBrowser() {
-                if (!confirm('Ви впевнені що хочете перезапустити браузер? Це займе 10-15 секунд.')) {
-                    return;
-                }
-                
-                document.getElementById('status').textContent = '⏳ Перезапуск браузера...';
-                try {
-                    const data = await request('/api/restart-browser', 'POST');
-                    alert(data.message);
-                    await updateStatus();
-                    await refreshScreenshot();
-                } catch (e) {
-                    alert('Помилка: ' + e.message);
-                }
-            }
-            
             async function handleClick(event) {
                 const img = event.target;
                 const rect = img.getBoundingClientRect();
@@ -465,24 +432,6 @@ async def handle_root(request):
                     document.getElementById('browser-status').textContent = data.browser;
                     document.getElementById('last-update').textContent = data.last_update || '-';
                     document.getElementById('cookies-status').textContent = data.cookies;
-                    
-                    // Вычисляем время до перезапуска
-                    const now = new Date();
-                    const hours = now.getHours();
-                    const minutes = now.getMinutes();
-                    
-                    let hoursLeft, minutesLeft;
-                    if (hours < 23 || (hours === 23 && minutes < 58)) {
-                        hoursLeft = 23 - hours;
-                        minutesLeft = 58 - minutes;
-                        if (minutesLeft < 0) {
-                            hoursLeft -= 1;
-                            minutesLeft += 60;
-                        }
-                        document.getElementById('time-to-restart').textContent = `${hoursLeft}г ${minutesLeft}хв`;
-                    } else {
-                        document.getElementById('time-to-restart').textContent = 'Скоро...';
-                    }
                     
                     const statusElem = document.getElementById('status');
                     if (data.browser === '✅ Відкритий') {
@@ -606,26 +555,6 @@ async def handle_status(request):
         'cookies': cookies_status
     })
 
-async def handle_restart_browser(request):
-    """API: Перезапустити браузер"""
-    try:
-        if not checker.browser:
-            return web.json_response({
-                'message': 'Браузер не ініціалізовано',
-                'success': False
-            }, status=400)
-        
-        await checker.restart_browser()
-        return web.json_response({
-            'message': 'Браузер успішно перезапущено!',
-            'success': True
-        })
-    except Exception as e:
-        return web.json_response({
-            'message': f'Помилка перезапуску: {str(e)}',
-            'success': False
-        }, status=500)
-
 async def start_web_server():
     """Запуск веб-сервера з VNC інтерфейсом"""
     app = web.Application()
@@ -639,7 +568,6 @@ async def start_web_server():
     app.router.add_get('/api/check', handle_check)
     app.router.add_post('/api/clear-cookies', handle_clear_cookies)
     app.router.add_get('/api/status', handle_status)
-    app.router.add_post('/api/restart-browser', handle_restart_browser)
     
     runner = web.AppRunner(app)
     await runner.setup()
@@ -767,45 +695,74 @@ class DTEKChecker:
             await self._save_cookies()
     
     async def _close_survey_if_present(self):
-        """Закриває опрос якщо він з'явився - покращена версія без warnings"""
+        """Закриває опрос якщо він з'явився - покращена версія"""
         try:
-            # Використовуємо JavaScript для пошуку і закриття модального вікна
-            closed = await self.page.evaluate("""
+            # 1. Пробуємо знайти модальне вікно по паттерну з будь-яким номером
+            # Використовуємо JavaScript для пошуку елемента з відповідним ID
+            modal_found = await self.page.evaluate("""
                 () => {
-                    // Шукаємо всі видимі модальні вікна опросів
-                    const modalPatterns = [
-                        '[id^="modal-questionnaire-welcome-"]',
-                        '[id^="modal-questionnaire-"]',
-                        '.modal.is-open',
-                        '.micromodal-slide[aria-hidden="false"]'
-                    ];
-                    
-                    for (const pattern of modalPatterns) {
-                        const modals = document.querySelectorAll(pattern);
-                        for (const modal of modals) {
-                            const style = window.getComputedStyle(modal);
-                            if (style.display !== 'none' && style.visibility !== 'hidden') {
-                                // Знайшли видиме модальне вікно, шукаємо кнопку закриття
-                                const closeBtn = modal.querySelector('.modal__close, button[aria-label*="Close"]');
-                                if (closeBtn) {
-                                    closeBtn.click();
-                                    return { success: true, modal: modal.id };
-                                }
-                            }
+                    // Шукаємо всі елементи з ID що починається на modal-questionnaire-welcome-
+                    const modals = document.querySelectorAll('[id^="modal-questionnaire-welcome-"]');
+                    for (const modal of modals) {
+                        // Перевіряємо видимість модального вікна
+                        const style = window.getComputedStyle(modal);
+                        if (style.display !== 'none' && style.visibility !== 'hidden') {
+                            return modal.id;
                         }
                     }
-                    return { success: false };
+                    return null;
                 }
             """)
             
-            if closed.get('success'):
-                await asyncio.sleep(0.5)
-                return True
+            if modal_found:
+                print(f"✓ Знайдено модальне вікно опросу: {modal_found}")
+                
+                # Пробуємо закрити через специфічний селектор
+                close_selector = f"#{modal_found} .modal__close"
+                close_btn = self.page.locator(close_selector)
+                
+                if await close_btn.count() > 0:
+                    await close_btn.click()
+                    await asyncio.sleep(1)
+                    print(f"✓ Опрос закрито через селектор: {close_selector}")
+                    return True
             
+            # 2. Додаткова перевірка - шукаємо кнопку закриття по загальним селекторам
+            generic_selectors = [
+                '.modal__close',
+                'button.modal__close',
+                '.modal .modal__close',
+                'button[aria-label="Close"]',
+                '.questionnaire .modal__close'
+            ]
+            
+            for selector in generic_selectors:
+                close_btn = self.page.locator(selector)
+                if await close_btn.count() > 0 and await close_btn.is_visible():
+                    await close_btn.click()
+                    await asyncio.sleep(1)
+                    print(f"✓ Опрос закрито через загальний селектор: {selector}")
+                    return True
+            
+            # 3. Альтернативний метод - пошук через текст кнопки
+            try:
+                # Шукаємо кнопку з хрестиком або текстом закриття
+                close_by_text = self.page.locator('button:has-text("×"), button:has-text("✕")')
+                if await close_by_text.count() > 0:
+                    first_close = close_by_text.first
+                    if await first_close.is_visible():
+                        await first_close.click()
+                        await asyncio.sleep(1)
+                        print("✓ Опрос закрито через пошук по символу закриття")
+                        return True
+            except:
+                pass
+            
+            print("⚪ Модальне вікно опросу не знайдено")
             return False
                     
         except Exception as e:
-            # Тихо ігноруємо помилки - модальне вікно просто відсутнє
+            print(f"⚠ Помилка при закритті опросу: {e}")
             return False
 
     async def _wait_and_close_survey(self, timeout=3):
@@ -821,7 +778,7 @@ class DTEKChecker:
             return False
 
     async def _setup_page(self):
-        """Налаштування сторінки - НЕ ЗМІНЕНО!"""
+        """Налаштування сторінки - обновлена версія"""
         print("Налаштування сторінки...")
         await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='networkidle', timeout=60000)
         await self._random_delay(3000, 5000)
@@ -875,7 +832,7 @@ class DTEKChecker:
         await street_input.wait_for(state='visible', timeout=10000)
         await self._human_move_and_click(street_input)
         await street_input.clear()
-        await self._human_type(street_input, 'київ')
+        await self._human_type(street_input, 'киї')
         await self._random_delay(1800, 2500)
         
         street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
@@ -1096,27 +1053,7 @@ class DTEKChecker:
             print("="*50)
             
             schedule_today = await self.parse_schedule()
-            
-            # Робимо screenshot з retry логікою
-            screenshot_main = None
-            for attempt in range(3):
-                try:
-                    print(f"Роблю скріншот сьогодні (спроба {attempt + 1}/3)...")
-                    screenshot_main = await asyncio.wait_for(
-                        self.page.screenshot(full_page=True, type='png'),
-                        timeout=60.0  # Збільшили timeout до 60 секунд
-                    )
-                    break
-                except asyncio.TimeoutError:
-                    if attempt < 2:
-                        print(f"⚠ Timeout при screenshot, повторюю...")
-                        await asyncio.sleep(2)
-                    else:
-                        raise
-            
-            if not screenshot_main:
-                raise Exception("Не вдалося створити скріншот після 3 спроб")
-            
+            screenshot_main = await self.page.screenshot(full_page=True, type='png')
             screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
             
             # ЗАВТРА
@@ -1140,31 +1077,17 @@ class DTEKChecker:
                 print("✓ Клікнув на другий графік, чекаю завантаження...")
                 await asyncio.sleep(3)
                 
-                # Закриваємо опрос який міг з'явитись після перемикання
+                # Закриваємо опрос який міг з'явитись після переключення
                 await self._close_survey_if_present()
                 await asyncio.sleep(1)
                 
+                print("Роблю скріншот другого графіка...")
                 schedule_tomorrow = await self.parse_schedule()
+                screenshot_tomorrow = await self.page.screenshot(full_page=True, type='png')
+                screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
+                print("✓ Скріншот другого графіка готовий")
                 
-                # Робимо screenshot з retry
-                for attempt in range(3):
-                    try:
-                        print(f"Роблю скріншот завтра (спроба {attempt + 1}/3)...")
-                        screenshot_tomorrow = await asyncio.wait_for(
-                            self.page.screenshot(full_page=True, type='png'),
-                            timeout=60.0
-                        )
-                        screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
-                        print("✓ Скріншот другого графіка готовий")
-                        break
-                    except asyncio.TimeoutError:
-                        if attempt < 2:
-                            print(f"⚠ Timeout при screenshot завтра, повторюю...")
-                            await asyncio.sleep(2)
-                        else:
-                            print("⚠ Не вдалося зробити скріншот завтра після 3 спроб")
-                
-                # Повертаємося назад
+                # Повертаємось назад
                 print("Повертаюсь на перший графік...")
                 first_date = self.page.locator('div.date:nth-child(1)')
                 await first_date.wait_for(state='visible', timeout=10000)
@@ -1196,31 +1119,6 @@ class DTEKChecker:
             import traceback
             traceback.print_exc()
             raise
-
-    async def restart_browser(self):
-        """Перезапускає браузер (для оновлення сесії)"""
-        try:
-            print("\n" + "="*50)
-            print("🔄 ПЕРЕЗАПУСК БРАУЗЕРА")
-            print("="*50)
-            
-            # Зберігаємо куки перед закриттям
-            await self._save_cookies()
-            
-            # Закриваємо браузер
-            await self.close_browser()
-            await asyncio.sleep(2)
-            
-            # Ініціалізуємо знову
-            await self.init_browser()
-            
-            print("✓ Браузер успішно перезапущено")
-            print("="*50 + "\n")
-            
-        except Exception as e:
-            print(f"✖️ Помилка при перезапуску браузера: {e}")
-            import traceback
-            traceback.print_exc()
 
     async def close_browser(self):
         """Закриття браузера"""
@@ -1272,7 +1170,6 @@ async def on_ready():
     print(f'✓ Інтервал перевірки: кожні 5 хвилин')
     print(f'🌐 Веб-інтерфейс для проходження капчі запущено на порту {PORT}')
     print(f'🥷 STEALTH MODE активовано')
-    print(f'⏰ Автоматичний перезапуск браузера: щоночі о 23:58')
     await init_db_pool()
     await start_web_server()
     
@@ -1281,7 +1178,6 @@ async def on_ready():
     print("🎉 Бот готовий до роботи!")
     
     check_schedule.start()
-    midnight_browser_restart.start()
 
 @tasks.loop(minutes=5)
 async def check_schedule():
@@ -1437,35 +1333,6 @@ async def before_check_schedule():
     await bot.wait_until_ready()
     print("⏳ Очікування готовності бота...")
 
-@tasks.loop(minutes=1)
-async def midnight_browser_restart():
-    """Перезапускає браузер щоночі о 23:58 для оновлення сесії"""
-    try:
-        now = datetime.now()
-        
-        # Перевіряємо чи зараз 23:58-00:02
-        if now.hour == 23 and now.minute >= 58:
-            print(f"\n⏰ Настав час для перезапуску браузера (23:58-23:59)")
-            if checker.browser:
-                await checker.restart_browser()
-                # Чекаємо до 00:02 щоб уникнути повторного рестарту
-                await asyncio.sleep(240)
-        elif now.hour == 0 and now.minute <= 2:
-            print(f"\n⏰ Настав час для перезапуску браузера (00:00-00:02)")
-            if checker.browser:
-                await checker.restart_browser()
-                # Чекаємо 5 хвилин щоб уникнути повторного рестарту
-                await asyncio.sleep(300)
-                
-    except Exception as e:
-        print(f"⚠ Помилка при перезапуску браузера о півночі: {e}")
-
-@midnight_browser_restart.before_loop
-async def before_midnight_restart():
-    """Чекаємо готовності бота"""
-    await bot.wait_until_ready()
-    print("⏰ Midnight browser restart scheduler готовий")
-
 @bot.command(name='check')
 async def manual_check(ctx):
     """Ручна перевірка по команді !check"""
@@ -1594,12 +1461,6 @@ async def bot_info(ctx):
         inline=True
     )
     
-    embed.add_field(
-        name="⏰ Авто-перезапуск",
-        value="Щоночі о 23:58-00:02",
-        inline=False
-    )
-    
     if checker.last_update_date:
         embed.add_field(
             name="📅 Остання дата на сайті",
@@ -1615,13 +1476,7 @@ async def bot_info(ctx):
     
     embed.add_field(
         name="📋 Команди",
-        value=(
-            "`!check` - Ручна перевірка\n"
-            "`!info` - Інформація\n"
-            "`!status` - Детальний статус\n"
-            "`!restart` - Перезапустити браузер (адмін)\n"
-            "`!stop` - Зупинити (адмін)"
-        ),
+        value="`!check` - Ручна перевірка\n`!info` - Інформація\n`!status` - Детальний статус\n`!stop` - Зупинити (адміни)",
         inline=False
     )
     
@@ -1647,28 +1502,11 @@ async def bot_status(ctx):
     db_status = "✅ Підключено" if db_pool else "✖️ Не підключено"
     embed.add_field(name="База даних", value=db_status, inline=False)
     
-    check_task_status = "✅ Запущено" if check_schedule.is_running() else "✖️ Зупинено"
-    embed.add_field(name="Автоматична перевірка", value=check_task_status, inline=True)
-    
-    restart_task_status = "✅ Запущено" if midnight_browser_restart.is_running() else "✖️ Зупинено"
-    embed.add_field(name="Midnight restart", value=restart_task_status, inline=True)
+    task_status = "✅ Запущено" if check_schedule.is_running() else "✖️ Зупинено"
+    embed.add_field(name="Автоматична перевірка", value=task_status, inline=False)
     
     if checker.last_update_date:
         embed.add_field(name="📅 Дата на сайті", value=f"`{checker.last_update_date}`", inline=False)
-    
-    # Показуємо час до наступного перезапуску
-    now = datetime.now()
-    if now.hour < 23 or (now.hour == 23 and now.minute < 58):
-        hours_left = 23 - now.hour
-        minutes_left = 58 - now.minute
-        if minutes_left < 0:
-            hours_left -= 1
-            minutes_left += 60
-        embed.add_field(
-            name="⏰ До перезапуску браузера",
-            value=f"{hours_left}г {minutes_left}хв",
-            inline=False
-        )
     
     await ctx.send(embed=embed)
 
@@ -1678,7 +1516,6 @@ async def stop_bot(ctx):
     """Остановка бота"""
     await ctx.send("🛑 Зупиняю бота...")
     check_schedule.cancel()
-    midnight_browser_restart.cancel()
     try:
         await checker._save_cookies()
         await checker.close_browser()
@@ -1686,32 +1523,6 @@ async def stop_bot(ctx):
         pass
     await close_db_pool()
     await bot.close()
-
-@bot.command(name='restart')
-@commands.has_permissions(administrator=True)
-async def restart_browser_cmd(ctx):
-    """Ручний перезапуск браузера"""
-    if not checker.browser:
-        await ctx.send("✖️ Браузер не ініціалізовано")
-        return
-    
-    await ctx.send("🔄 Перезапускаю браузер...")
-    try:
-        await checker.restart_browser()
-        embed = discord.Embed(
-            title="✅ Браузер перезапущено",
-            description="Браузер успішно перезапущено і готовий до роботи",
-            color=discord.Color.green(),
-            timestamp=datetime.now()
-        )
-        await ctx.send(embed=embed)
-    except Exception as e:
-        error_embed = discord.Embed(
-            title="✖️ Помилка перезапуску",
-            description=f"```{str(e)[:500]}```",
-            color=discord.Color.red()
-        )
-        await ctx.send(embed=error_embed)
 
 if __name__ == '__main__':
     try:
