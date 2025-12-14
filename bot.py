@@ -467,25 +467,30 @@ async def handle_root(request):
 async def handle_screenshot(request):
     """API: Получити скріншот браузера"""
     try:
-        if not checker.browser or not checker.page:
-            return web.json_response({
-                'error': 'Browser not initialized',
-                'screenshot': None
-            }, status=400)
+        print("🔍 Запрос скриншота...")
         
-        screenshot = await checker.page.screenshot(type='png', full_page=True)
+        if not checker.browser:
+            print("❌ Браузер не инициализирован")
+            return web.json_response({'error': 'Browser not initialized', 'screenshot': None}, status=400)
+        
+        if not checker.page:
+            print("❌ Страница не загружена")
+            return web.json_response({'error': 'Page not loaded', 'screenshot': None}, status=400)
+        
+        print("📸 Делаю скриншот...")
+        screenshot = await checker.page.screenshot(type='png', full_page=False)
         screenshot_base64 = base64.b64encode(screenshot).decode('utf-8')
+        print(f"✅ Скриншот готов: {len(screenshot_base64)} символов")
         
         return web.json_response({
             'screenshot': screenshot_base64,
             'timestamp': datetime.now().isoformat()
         })
     except Exception as e:
-        print(f"Screenshot error: {e}")
-        return web.json_response({
-            'error': str(e),
-            'screenshot': None
-        }, status=500)
+        print(f"❌ Ошибка скриншота: {e}")
+        import traceback
+        traceback.print_exc()
+        return web.json_response({'error': str(e), 'screenshot': None}, status=500)
 
 async def handle_click(request):
     """API: Передати клік в браузер"""
