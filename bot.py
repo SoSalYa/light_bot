@@ -467,8 +467,11 @@ async def handle_root(request):
 async def handle_screenshot(request):
     """API: Получити скріншот браузера"""
     try:
-        if not checker.page:
-            return web.json_response({'error': 'Browser not initialized'}, status=400)
+        if not checker.browser or not checker.page:
+            return web.json_response({
+                'error': 'Browser not initialized',
+                'screenshot': None
+            }, status=400)
         
         screenshot = await checker.page.screenshot(type='png', full_page=True)
         screenshot_base64 = base64.b64encode(screenshot).decode('utf-8')
@@ -478,7 +481,11 @@ async def handle_screenshot(request):
             'timestamp': datetime.now().isoformat()
         })
     except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
+        print(f"Screenshot error: {e}")
+        return web.json_response({
+            'error': str(e),
+            'screenshot': None
+        }, status=500)
 
 async def handle_click(request):
     """API: Передати клік в браузер"""
@@ -546,14 +553,25 @@ async def handle_clear_cookies(request):
 
 async def handle_status(request):
     """API: Получити статус бота"""
-    browser_status = "✅ Відкритий" if checker.browser else "✖️ Закритий"
-    cookies_status = "✅ Є" if os.path.exists(checker.cookies_file) else "✖️ Немає"
-    
-    return web.json_response({
-        'browser': browser_status,
-        'last_update': checker.last_update_date,
-        'cookies': cookies_status
-    })
+    try:
+        browser_status = "✅ Відкритий" if (checker.browser and checker.page) else "✖️ Закритий"
+        cookies_status = "✅ Є" if os.path.exists(checker.cookies_file) else "✖️ Немає"
+        last_update = checker.last_update_date if checker.last_update_date else "Немає даних"
+        
+        return web.json_response({
+            'browser': browser_status,
+            'last_update': last_update,
+            'cookies': cookies_status,
+            'page_ready': checker.page is not None
+        })
+    except Exception as e:
+        print(f"Status error: {e}")
+        return web.json_response({
+            'browser': "✖️ Помилка",
+            'last_update': "Помилка",
+            'cookies': "✖️ Помилка",
+            'page_ready': False
+        }, status=500)
 
 async def start_web_server():
     """Запуск веб-сервера з VNC інтерфейсом"""
@@ -892,7 +910,7 @@ class DTEKChecker:
             print(f"Помилка при перевірці: {e}")
             return False
 
-    async def parse_schedule(self):
+async def parse_schedule(self):
         """
         Парсить графік відключень з активної вкладки
         """
@@ -926,7 +944,7 @@ class DTEKChecker:
                     cell_class = await cell_elem.get_attribute('class')
                     cell_class = cell_class.strip() if cell_class else ""
                     
-                    hour = result['hours'][i-2]
+                    hour = result['hours'][i-2] if (i-2) < len(result['hours']) else "??:??"
                     
                     # Визначаємо статус
                     if 'cell-scheduled' in cell_class:
@@ -946,17 +964,24 @@ class DTEKChecker:
                     }
                     
                 except Exception as e:
-                    hour = result['hours'][i-2] if i-2 < len(result['hours']) else "??:??"
+                    hour = result['hours'][i-2] if (i-2) < len(result['hours']) else "??:??"
                     result['schedule'][hour] = {
                         'status': 'error',
                         'class': ''
                     }
             
+            print(f"✓ Парсинг завершено: {len(result['schedule'])} годин")
             return result
             
         except Exception as e:
             print(f"Помилка парсингу: {e}")
-            return None
+            import traceback
+            traceback.print_exc()
+            return {
+                'date': 'Невідомо',
+                'hours': [],
+                'schedule': {}
+            }
 
     def _calculate_schedule_hash(self, schedule):
         """Розраховує хеш графіка для порівняння"""
@@ -1053,6 +1078,13 @@ class DTEKChecker:
             print("="*50)
             
             schedule_today = await self.parse_schedule()
+            if not schedule_today or not isinstance(schedule_today, dict):
+                print("⚠️ Помилка: schedule_today не є словником")
+                schedule_today = {
+                    'date': 'Невідомо',
+                    'hours': [],
+                    'schedule': {}
+                }
             screenshot_main = await self.page.screenshot(full_page=True, type='png')
             screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
             
@@ -1083,6 +1115,9 @@ class DTEKChecker:
                 
                 print("Роблю скріншот другого графіка...")
                 schedule_tomorrow = await self.parse_schedule()
+                if not schedule_tomorrow or not isinstance(schedule_tomorrow, dict):
+                    print("⚠️ Помилка: schedule_tomorrow не є словником")
+                    schedule_tomorrow = None
                 screenshot_tomorrow = await self.page.screenshot(full_page=True, type='png')
                 screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
                 print("✓ Скріншот другого графіка готовий")
@@ -1206,9 +1241,12 @@ async def check_schedule():
         
         # Дата оновилась - робимо скріншоти і парсимо
         result = await asyncio.wait_for(checker.make_screenshots(), timeout=180)
-        
+
         # Перевіряємо чи змінився графік
         schedule_today = result.get('schedule_today')
+        if not schedule_today or not isinstance(schedule_today, dict):
+            print("⚠️ Отримано невалідний графік")
+            return
         current_hash = checker._calculate_schedule_hash(schedule_today)
         
         last_check = await get_last_check()
@@ -1344,9 +1382,11 @@ async def manual_check(ctx):
     
     try:
         result = await asyncio.wait_for(checker.make_screenshots(), timeout=180)
-        
         # Перевіряємо чи змінився графік
         schedule_today = result.get('schedule_today')
+        if not schedule_today or not isinstance(schedule_today, dict):
+            await ctx.send("⚠️ Помилка: не вдалося отримати графік")
+            return
         current_hash = checker._calculate_schedule_hash(schedule_today)
         
         # Отримуємо попередній графік для порівняння
