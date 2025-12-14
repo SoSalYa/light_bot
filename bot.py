@@ -910,7 +910,7 @@ class DTEKChecker:
             print(f"Помилка при перевірці: {e}")
             return False
 
-async def parse_schedule(self):
+    async def parse_schedule(self):
         """
         Парсить графік відключень з активної вкладки
         """
