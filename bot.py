@@ -342,7 +342,15 @@ async def handle_root(request):
             
             async function refreshScreenshot() {
                 try {
+                    console.log('Запрос скриншота...');
                     const data = await request('/api/screenshot');
+                    
+                    if (data.error) {
+                        console.error('Ошибка от сервера:', data.error);
+                        document.getElementById('loading').innerHTML = '<div class="spinner"></div><p>Ошибка: ' + data.error + '</p>';
+                        return;
+                    }
+                    
                     if (data.screenshot) {
                         const img = document.getElementById('screenshot');
                         img.src = 'data:image/png;base64,' + data.screenshot;
@@ -352,12 +360,22 @@ async def handle_root(request):
                         img.onload = function() {
                             imageNaturalWidth = img.naturalWidth;
                             imageNaturalHeight = img.naturalHeight;
+                            console.log('Скриншот загружен:', imageNaturalWidth, 'x', imageNaturalHeight);
+                        };
+                        
+                        img.onerror = function() {
+                            console.error('Ошибка загрузки изображения');
+                            document.getElementById('loading').innerHTML = '<p>Ошибка загрузки изображения</p>';
                         };
                         
                         document.getElementById('last-refresh').textContent = new Date().toLocaleTimeString();
+                    } else {
+                        console.warn('Нет скриншота в ответе');
+                        document.getElementById('loading').innerHTML = '<p>Скриншот недоступен</p>';
                     }
                 } catch (e) {
-                    console.error('Error refreshing screenshot:', e);
+                    console.error('Ошибка refreshScreenshot:', e);
+                    document.getElementById('loading').innerHTML = '<p>Ошибка: ' + e.message + '</p>';
                 }
             }
             
@@ -1083,6 +1101,7 @@ class DTEKChecker:
             print("="*50)
             
             schedule_today = await self.parse_schedule()
+            
             if not schedule_today or not isinstance(schedule_today, dict):
                 print("⚠️ Помилка: schedule_today не є словником")
                 schedule_today = {
@@ -1090,6 +1109,7 @@ class DTEKChecker:
                     'hours': [],
                     'schedule': {}
                 }
+            
             screenshot_main = await self.page.screenshot(full_page=True, type='png')
             screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
             
@@ -1120,9 +1140,11 @@ class DTEKChecker:
                 
                 print("Роблю скріншот другого графіка...")
                 schedule_tomorrow = await self.parse_schedule()
+                
                 if not schedule_tomorrow or not isinstance(schedule_tomorrow, dict):
                     print("⚠️ Помилка: schedule_tomorrow не є словником")
                     schedule_tomorrow = None
+                
                 screenshot_tomorrow = await self.page.screenshot(full_page=True, type='png')
                 screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
                 print("✓ Скріншот другого графіка готовий")
