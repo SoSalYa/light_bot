@@ -3,7 +3,7 @@ from discord.ext import commands, tasks
 import asyncio
 from playwright.async_api import async_playwright
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import io
 import asyncpg
 from PIL import Image
@@ -27,6 +27,9 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+# Глобальна змінна для відстеження останнього виводу "Без змін"
+last_no_change_log = None
+
 async def init_db_pool():
     """Ініціалізація connection pool для PostgreSQL"""
     global db_pool
@@ -46,10 +49,20 @@ async def init_db_pool():
                     id SERIAL PRIMARY KEY,
                     update_date TEXT,
                     schedule_hash TEXT,
-                    schedule_data JSONB,
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
+            
+            # Міграція: додаємо колонку schedule_data якщо її немає
+            try:
+                await conn.execute('''
+                    ALTER TABLE dtek_checks 
+                    ADD COLUMN IF NOT EXISTS schedule_data JSONB
+                ''')
+                print("✓ Міграція БД виконана успішно")
+            except Exception as e:
+                print(f"⚠ Помилка міграції БД (можливо вже виконана): {e}")
+        
         print("✓ Таблиця БД готова")
 
 async def close_db_pool():
@@ -286,7 +299,7 @@ async def handle_root(request):
                     <button class="btn-primary" onclick="refreshScreenshot()">🔄 Оновити скріншот</button>
                     <button class="btn-success" onclick="initBrowser()">🚀 Ініціалізувати браузер</button>
                     <button class="btn-info" onclick="manualCheck()">✅ Зробити перевірку</button>
-                    <button class="btn-danger" onclick="clearCookies()">🍪 Очистити куки</button>
+                    <button class="btn-danger" onclick="clearCookies()">🪙 Очистити куки</button>
                 </div>
             </div>
             
@@ -362,7 +375,7 @@ async def handle_root(request):
             }
             
             async function initBrowser() {
-                document.getElementById('status').textContent = '⏳ Ініціалізація...';
+                document.getElementById('status').textContent = '⳨ Ініціалізація...';
                 try {
                     const data = await request('/api/init');
                     alert(data.message);
@@ -374,7 +387,7 @@ async def handle_root(request):
             }
             
             async function manualCheck() {
-                document.getElementById('status').textContent = '⏳ Перевірка...';
+                document.getElementById('status').textContent = '⳨ Перевірка...';
                 try {
                     const data = await request('/api/check');
                     alert(data.message);
@@ -470,7 +483,7 @@ async def handle_screenshot(request):
         if not checker.page:
             return web.json_response({'error': 'Browser not initialized'}, status=400)
         
-        screenshot = await checker.page.screenshot(type='png', full_page=True)
+        screenshot = await checker.page.screenshot(type='png', full_page=True, timeout=60000)
         screenshot_base64 = base64.b64encode(screenshot).decode('utf-8')
         
         return web.json_response({
@@ -598,7 +611,6 @@ class DTEKChecker:
                 cookies = await self.context.cookies()
                 with open(self.cookies_file, 'w') as f:
                     json.dump(cookies, f)
-                print("✓ Куки збережено")
         except Exception as e:
             print(f"⚠ Не вдалося зберегти куки: {e}")
     
@@ -608,7 +620,6 @@ class DTEKChecker:
                 with open(self.cookies_file, 'r') as f:
                     cookies = json.load(f)
                 await self.context.add_cookies(cookies)
-                print("✓ Куки завантажено")
                 return True
         except Exception as e:
             print(f"⚠ Не вдалося завантажити куки: {e}")
@@ -695,16 +706,13 @@ class DTEKChecker:
             await self._save_cookies()
     
     async def _close_survey_if_present(self):
-        """Закриває опрос якщо він з'явився - покращена версія"""
+        """Закриває опрос якщо він з'явився - ТИХА версія без логів"""
         try:
-            # 1. Пробуємо знайти модальне вікно по паттерну з будь-яким номером
-            # Використовуємо JavaScript для пошуку елемента з відповідним ID
+            # Пробуємо знайти модальне вікно по паттерну з будь-яким номером
             modal_found = await self.page.evaluate("""
                 () => {
-                    // Шукаємо всі елементи з ID що починається на modal-questionnaire-welcome-
                     const modals = document.querySelectorAll('[id^="modal-questionnaire-welcome-"]');
                     for (const modal of modals) {
-                        // Перевіряємо видимість модального вікна
                         const style = window.getComputedStyle(modal);
                         if (style.display !== 'none' && style.visibility !== 'hidden') {
                             return modal.id;
@@ -715,19 +723,15 @@ class DTEKChecker:
             """)
             
             if modal_found:
-                print(f"✓ Знайдено модальне вікно опросу: {modal_found}")
-                
-                # Пробуємо закрити через специфічний селектор
                 close_selector = f"#{modal_found} .modal__close"
                 close_btn = self.page.locator(close_selector)
                 
                 if await close_btn.count() > 0:
                     await close_btn.click()
                     await asyncio.sleep(1)
-                    print(f"✓ Опрос закрито через селектор: {close_selector}")
                     return True
             
-            # 2. Додаткова перевірка - шукаємо кнопку закриття по загальним селекторам
+            # Додаткова перевірка - шукаємо кнопку закриття по загальним селекторам
             generic_selectors = [
                 '.modal__close',
                 'button.modal__close',
@@ -741,34 +745,29 @@ class DTEKChecker:
                 if await close_btn.count() > 0 and await close_btn.is_visible():
                     await close_btn.click()
                     await asyncio.sleep(1)
-                    print(f"✓ Опрос закрито через загальний селектор: {selector}")
                     return True
             
-            # 3. Альтернативний метод - пошук через текст кнопки
+            # Альтернативний метод - пошук через текст кнопки
             try:
-                # Шукаємо кнопку з хрестиком або текстом закриття
                 close_by_text = self.page.locator('button:has-text("×"), button:has-text("✕")')
                 if await close_by_text.count() > 0:
                     first_close = close_by_text.first
                     if await first_close.is_visible():
                         await first_close.click()
                         await asyncio.sleep(1)
-                        print("✓ Опрос закрито через пошук по символу закриття")
                         return True
             except:
                 pass
             
-            print("⚪ Модальне вікно опросу не знайдено")
             return False
                     
-        except Exception as e:
-            print(f"⚠ Помилка при закритті опросу: {e}")
+        except:
+            # Всі помилки ігноруємо тихо
             return False
 
     async def _wait_and_close_survey(self, timeout=3):
-        """Чекає появи опросу і закриває його"""
+        """Чекає появи опросу і закриває його - ТИХО"""
         try:
-            # Чекаємо трохи і перевіряємо декілька раз
             for i in range(timeout):
                 if await self._close_survey_if_present():
                     return True
@@ -778,20 +777,25 @@ class DTEKChecker:
             return False
 
     async def _setup_page(self):
-        """Налаштування сторінки - обновлена версія"""
-        print("Налаштування сторінки...")
+        """Налаштування сторінки - спрощена версія"""
+        print("⏳ Завантаження сторінки...")
         await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='networkidle', timeout=60000)
         await self._random_delay(3000, 5000)
         
         # Закриваємо опрос одразу після завантаження
         await self._wait_and_close_survey(timeout=3)
         
+        # Перевірка капчі
         try:
             captcha_checkbox = self.page.locator('iframe[src*="checkbox"]')
             if await captcha_checkbox.count() > 0:
                 print("⚠️ Виявлено капчу! Використовуйте веб-інтерфейс.")
+                print("⏳ Очікування проходження капчі...")
                 for i in range(300):
                     await asyncio.sleep(1)
+                    # Прогрес-індикатор кожні 30 секунд
+                    if i > 0 and i % 30 == 0:
+                        print(f"   ... очікування {i}с / 300с")
                     # Перевіряємо опрос кожні 10 секунд під час очікування капчі
                     if i % 10 == 0:
                         await self._close_survey_if_present()
@@ -803,10 +807,9 @@ class DTEKChecker:
             pass
         
         await self._random_delay(1500, 2500)
-        
-        # Ще раз перевіряємо опрос перед початком роботи
         await self._close_survey_if_present()
         
+        # Закриваємо банер попередження
         try:
             close_btn = self.page.locator('button.m-attention__close')
             if await close_btn.count() > 0:
@@ -814,14 +817,14 @@ class DTEKChecker:
         except:
             pass
         
-        # Решта коду заповнення форми залишається без змін...
-        print("Вводжу місто...")
+        # Заповнюємо адресу
+        print("📝 Заповнення адреси...")
         city_input = self.page.locator('.discon-input-wrapper #city')
         await city_input.wait_for(state='visible', timeout=10000)
         await self._human_move_and_click(city_input)
         await city_input.clear()
-        await asyncio.sleep(0.5)  # Додаткова пауза
-        await self._human_type(city_input, 'княж')
+        await asyncio.sleep(0.5)
+        await self._human_type(city_input, 'книж')
         
         city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
         await city_option.wait_for(state='visible', timeout=10000)
@@ -832,7 +835,7 @@ class DTEKChecker:
         await street_input.wait_for(state='visible', timeout=10000)
         await self._human_move_and_click(street_input)
         await street_input.clear()
-        await self._human_type(street_input, 'киї')
+        await self._human_type(street_input, 'київ')
         await self._random_delay(1800, 2500)
         
         street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
@@ -855,6 +858,7 @@ class DTEKChecker:
         # Фінальна перевірка опросу
         await self._close_survey_if_present()
         
+        # Отримуємо дату оновлення
         try:
             update_elem = self.page.locator('span.update')
             await update_elem.wait_for(state='visible', timeout=15000)
@@ -867,9 +871,9 @@ class DTEKChecker:
         print("✅ Сторінка налаштована!")
 
     async def check_for_update(self):
-        """Перевіряє чи змінилась дата - оновлена версія"""
+        """Перевіряє чи змінилась дата"""
         try:
-            # Закриваємо опрос ПЕРЕД перевіркою
+            # Закриваємо опрос ПЕРЕД перевіркою - тихо
             await self._close_survey_if_present()
             
             if random.random() < 0.3:
@@ -880,22 +884,22 @@ class DTEKChecker:
             current_date = await update_elem.text_content()
             current_date = current_date.strip()
             
-            print(f"Поточна дата: {current_date}, Остання: {self.last_update_date}")
-            
             if current_date != self.last_update_date:
-                print("📢 ОНОВЛЕННЯ ВИЯВЛЕНО!")
+                print(f"\n{'='*50}")
+                print(f"📢 ОНОВЛЕННЯ ВИЯВЛЕНО!")
+                print(f"Попередня: {self.last_update_date}")
+                print(f"Поточна: {current_date}")
+                print(f"{'='*50}\n")
                 self.last_update_date = current_date
                 await self._save_cookies()
                 return True
             return False
         except Exception as e:
-            print(f"Помилка при перевірці: {e}")
+            print(f"⚠ Помилка при перевірці: {e}")
             return False
 
     async def parse_schedule(self):
-        """
-        Парсить графік відключень з активної вкладки
-        """
+        """Парсить графік відключень з активної вкладки"""
         try:
             date_elem = self.page.locator('.date.active')
             schedule_date = await date_elem.text_content()
@@ -955,7 +959,7 @@ class DTEKChecker:
             return result
             
         except Exception as e:
-            print(f"Помилка парсингу: {e}")
+            print(f"⚠ Помилка парсингу: {e}")
             return None
 
     def _calculate_schedule_hash(self, schedule):
@@ -984,9 +988,7 @@ class DTEKChecker:
         return False
 
     def _compare_schedules(self, old_schedule, new_schedule):
-        """
-        Порівнює два графіки і повертає текстовий опис змін
-        """
+        """Порівнює два графіки і повертає текстовий опис змін"""
         if not old_schedule or not new_schedule:
             return "📊 Перша перевірка - немає з чим порівнювати"
         
@@ -1030,8 +1032,6 @@ class DTEKChecker:
             right = width - right_crop
             bottom = height - bottom_crop
             
-            print(f"Обрізаю скріншот: {width}x{height} -> {right-left}x{bottom-top}")
-            
             cropped = image.crop((left, top, right, bottom))
             
             output = io.BytesIO()
@@ -1048,19 +1048,11 @@ class DTEKChecker:
             await asyncio.sleep(0.5)
             
             # СЬОГОДНІ
-            print("\n" + "="*50)
-            print("📊 ПАРСИНГ ГРАФІКА НА СЬОГОДНІ")
-            print("="*50)
-            
             schedule_today = await self.parse_schedule()
-            screenshot_main = await self.page.screenshot(full_page=True, type='png')
+            screenshot_main = await self.page.screenshot(full_page=True, type='png', timeout=60000)
             screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
             
             # ЗАВТРА
-            print("\n" + "="*50)
-            print("📊 ПАРСИНГ ГРАФІКА НА ЗАВТРА")
-            print("="*50)
-            
             second_date = None
             screenshot_tomorrow_cropped = None
             schedule_tomorrow = None
@@ -1071,24 +1063,19 @@ class DTEKChecker:
                 
                 second_date = await date_selector.text_content()
                 second_date = second_date.strip()
-                print(f"Дата другого графіка: {second_date}")
                 
                 await date_selector.click()
-                print("✓ Клікнув на другий графік, чекаю завантаження...")
                 await asyncio.sleep(3)
                 
                 # Закриваємо опрос який міг з'явитись після переключення
                 await self._close_survey_if_present()
                 await asyncio.sleep(1)
                 
-                print("Роблю скріншот другого графіка...")
                 schedule_tomorrow = await self.parse_schedule()
-                screenshot_tomorrow = await self.page.screenshot(full_page=True, type='png')
+                screenshot_tomorrow = await self.page.screenshot(full_page=True, type='png', timeout=60000)
                 screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
-                print("✓ Скріншот другого графіка готовий")
                 
-                # Повертаємось назад
-                print("Повертаюсь на перший графік...")
+                # Повертаємося назад
                 first_date = self.page.locator('div.date:nth-child(1)')
                 await first_date.wait_for(state='visible', timeout=10000)
                 await first_date.click()
@@ -1096,8 +1083,6 @@ class DTEKChecker:
                 
                 # Закриваємо опрос після повернення на перший графік
                 await self._close_survey_if_present()
-                
-                print(f"✓ Повернувся на перший графік")
                 
             except asyncio.TimeoutError as te:
                 print(f"⚠ Таймаут при роботі зі другим графіком: {te}")
@@ -1144,11 +1129,11 @@ async def get_last_check():
                 return {
                     'update_date': row['update_date'],
                     'schedule_hash': row['schedule_hash'],
-                    'schedule_data': row['schedule_data'],
+                    'schedule_data': row['schedule_data'] if 'schedule_data' in row else None,
                     'created_at': row['created_at']
                 }
     except Exception as e:
-        print(f"Помилка при отриманні даних з БД: {e}")
+        print(f"⚠ Помилка при отриманні даних з БД: {e}")
     return None
 
 async def save_check(update_date, schedule_hash, schedule_data):
@@ -1159,16 +1144,15 @@ async def save_check(update_date, schedule_hash, schedule_data):
                 'INSERT INTO dtek_checks (update_date, schedule_hash, schedule_data, created_at) VALUES ($1, $2, $3, $4)',
                 update_date, schedule_hash, json.dumps(schedule_data), datetime.now()
             )
-        print(f"✓ Дані збережено в БД")
     except Exception as e:
-        print(f"✖️ Помилка при збереженні в БД: {e}")
+        print(f"⚠ Помилка при збереженні в БД: {e}")
 
 @bot.event
 async def on_ready():
     print(f'✓ {bot.user} підключено до Discord!')
     print(f'✓ Моніторинг каналу: {CHANNEL_ID}')
     print(f'✓ Інтервал перевірки: кожні 5 хвилин')
-    print(f'🌐 Веб-інтерфейс для проходження капчі запущено на порту {PORT}')
+    print(f'🌐 Веб-інтерфейс для управління браузером включено')
     print(f'🥷 STEALTH MODE активовано')
     await init_db_pool()
     await start_web_server()
@@ -1182,10 +1166,10 @@ async def on_ready():
 @tasks.loop(minutes=5)
 async def check_schedule():
     """Періодична перевірка кожні 5 хвилин"""
+    global last_no_change_log
     channel = None
     try:
         if not checker.browser or not checker.page:
-            print("⏸️ Браузер не ініціалізовано, пропускаю перевірку")
             return
         
         channel = bot.get_channel(CHANNEL_ID)
@@ -1193,19 +1177,18 @@ async def check_schedule():
             print(f"✖️ Канал {CHANNEL_ID} не знайдено!")
             return
         
-        print(f"\n{'='*50}")
-        print(f"[{datetime.now()}] Запуск автоматичної перевірки...")
-        print(f"{'='*50}")
-        
         has_update = await checker.check_for_update()
         
         if not has_update:
-            print(f"ℹ️ Без змін (дата не оновилась)")
-            print(f"{'='*50}\n")
+            # Виводимо "Без змін" тільки раз на годину
+            now = datetime.now()
+            if last_no_change_log is None or (now - last_no_change_log) >= timedelta(hours=1):
+                print(f"[{now.strftime('%H:%M')}] ℹ️ Без змін (дата не оновилась)")
+                last_no_change_log = now
             return
         
         # Дата оновилась - робимо скріншоти і парсимо
-        result = await asyncio.wait_for(checker.make_screenshots(), timeout=180)
+        result = await asyncio.wait_for(checker.make_screenshots(), timeout=300)  # 5 хвилин
         
         # Перевіряємо чи змінився графік
         schedule_today = result.get('schedule_today')
@@ -1217,7 +1200,6 @@ async def check_schedule():
         changes_text = None
         if last_check and last_check['schedule_hash'] == current_hash:
             print("⏸️ Графік не змінився (тільки дата оновилась)")
-            print(f"{'='*50}\n")
             return
         elif last_check and last_check.get('schedule_data'):
             # Є попередній графік - порівнюємо
@@ -1293,17 +1275,15 @@ async def check_schedule():
             else:
                 print("⏸️ Завтра немає відключень - не відправляю")
         
-        print(f"✓ Повідомлення відправлено в Discord")
-        print(f"{'='*50}\n")
+        print(f"✓ Повідомлення відправлено в Discord\n")
         
     except asyncio.TimeoutError:
-        print(f"⏱️ ТАЙМАУТ: Операція зайняла більше 3 хвилин")
-        print(f"{'='*50}\n")
+        print(f"⏱️ ТАЙМАУТ: Операція зайняла більше 5 хвилин")
         if channel:
             try:
                 error_embed = discord.Embed(
                     title="⏱️ Таймаут операції",
-                    description="Перевірка зайняла більше 3 хвилин. Можливо, сайт повільно завантажується.",
+                    description="Перевірка зайняла більше 5 хвилин. Можливо, сайт повільно завантажується.",
                     color=discord.Color.dark_gray(),
                     timestamp=datetime.now()
                 )
@@ -1331,7 +1311,6 @@ async def check_schedule():
 async def before_check_schedule():
     """Чекаємо, поки бот буде готовий"""
     await bot.wait_until_ready()
-    print("⏳ Очікування готовності бота...")
 
 @bot.command(name='check')
 async def manual_check(ctx):
@@ -1340,10 +1319,10 @@ async def manual_check(ctx):
         await ctx.send("✖️ Браузер не ініціалізовано. Відкрийте веб-інтерфейс та натисніть 'Ініціалізувати браузер'")
         return
     
-    await ctx.send("⏳ Починаю перевірку графіка відключень...")
+    await ctx.send("⳨ Починаю перевірку графіка відключень...")
     
     try:
-        result = await asyncio.wait_for(checker.make_screenshots(), timeout=180)
+        result = await asyncio.wait_for(checker.make_screenshots(), timeout=300)
         
         # Перевіряємо чи змінився графік
         schedule_today = result.get('schedule_today')
@@ -1414,7 +1393,7 @@ async def manual_check(ctx):
     except asyncio.TimeoutError:
         error_embed = discord.Embed(
             title="⏱️ Таймаут",
-            description="Перевірка зайняла більше 3 хвилин.",
+            description="Перевірка зайняла більше 5 хвилин.",
             color=discord.Color.dark_gray()
         )
         await ctx.send(embed=error_embed)
@@ -1456,7 +1435,7 @@ async def bot_info(ctx):
     
     cookies_status = "✅ Збережено" if os.path.exists(checker.cookies_file) else "✖️ Відсутні"
     embed.add_field(
-        name="🍪 Куки",
+        name="🪙 Куки",
         value=cookies_status,
         inline=True
     )
