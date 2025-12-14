@@ -695,15 +695,15 @@ class DTEKChecker:
             await self._save_cookies()
     
     async def _close_survey_if_present(self):
-        """Закриває опрос якщо він з'явився - покращена версія"""
+        """Закриває опрос якщо він з'явився - виправлена версія"""
         try:
-            # 1. Пробуємо знайти модальне вікно по паттерну з будь-яким номером
+            # 1. Шукаємо ВИДИМЕ модальне вікно опросу через JavaScript
             modal_found = await self.page.evaluate("""
                 () => {
                     const modals = document.querySelectorAll('[id^="modal-questionnaire-welcome-"]');
                     for (const modal of modals) {
                         const style = window.getComputedStyle(modal);
-                        if (style.display !== 'none' && style.visibility !== 'hidden') {
+                        if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
                             return modal.id;
                         }
                     }
@@ -714,50 +714,34 @@ class DTEKChecker:
             if modal_found:
                 print(f"✓ Знайдено модальне вікно опросу: {modal_found}")
                 
+                # Шукаємо кнопку закриття ТІЛЬКИ всередині цього модального вікна
                 close_selector = f"#{modal_found} .modal__close"
-                close_btn = self.page.locator(close_selector)
-                
-                if await close_btn.count() > 0:
-                    await close_btn.click()
-                    await asyncio.sleep(1)
-                    print(f"✓ Опрос закрито через селектор: {close_selector}")
-                    return True
-            
-            # 2. Додаткова перевірка - шукаємо кнопку закриття по загальним селекторам
-            generic_selectors = [
-                '.modal__close',
-                'button.modal__close',
-                '.modal .modal__close',
-                'button[aria-label="Close"]',
-                '.questionnaire .modal__close'
-            ]
-            
-            for selector in generic_selectors:
-                close_btn = self.page.locator(selector)
-                if await close_btn.count() > 0 and await close_btn.is_visible():
-                    await close_btn.click()
-                    await asyncio.sleep(1)
-                    print(f"✓ Опрос закрито через загальний селектор: {selector}")
-                    return True
-            
-            # 3. Альтернативний метод - пошук через текст кнопки
-            try:
-                close_by_text = self.page.locator('button:has-text("×"), button:has-text("✕")')
-                if await close_by_text.count() > 0:
-                    first_close = close_by_text.first
-                    if await first_close.is_visible():
-                        await first_close.click()
+                try:
+                    close_btn = self.page.locator(close_selector).first
+                    if await close_btn.is_visible():
+                        await close_btn.click()
                         await asyncio.sleep(1)
-                        print("✓ Опрос закрито через пошук по символу закриття")
+                        print(f"✓ Опрос закрито через селектор: {close_selector}")
                         return True
+                except:
+                    pass
+            
+            # 2. Альтернативний метод - шукаємо ВИДИМУ кнопку закриття опросу
+            try:
+                # Шукаємо кнопку з текстом закриття, яка ВИДИМА
+                close_by_text = self.page.locator('button:has-text("×")').first
+                if await close_by_text.is_visible(timeout=1000):
+                    await close_by_text.click()
+                    await asyncio.sleep(1)
+                    print("✓ Опрос закрито через символ ×")
+                    return True
             except:
                 pass
             
-            print("⚪ Модальне вікно опросу не знайдено")
             return False
                     
         except Exception as e:
-            print(f"⚠ Помилка при закритті опросу: {e}")
+            # Не логуємо помилки якщо просто не знайшли опрос
             return False
 
     async def _wait_and_close_survey(self, timeout=3):
@@ -772,93 +756,119 @@ class DTEKChecker:
             return False
 
     async def _setup_page(self):
-        """Налаштування сторінки - оновлена версія"""
+        """Налаштування сторінки - стабільна версія"""
         print("Налаштування сторінки...")
-        await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='networkidle', timeout=60000)
-        await self._random_delay(3000, 5000)
         
-        # Закриваємо опрос одразу після завантаження
-        await self._wait_and_close_survey(timeout=3)
+        # Збільшений таймаут для повільних з'єднань
+        await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='domcontentloaded', timeout=90000)
         
+        # Чекаємо повного завантаження
+        await asyncio.sleep(5)
+        
+        # Пробуємо закрити опрос одразу після завантаження
+        await self._close_survey_if_present()
+        await asyncio.sleep(1)
+        
+        # Перевіряємо капчу
         try:
             captcha_checkbox = self.page.locator('iframe[src*="checkbox"]')
-            if await captcha_checkbox.count() > 0:
-                print("⚠️ Виявлено капчу! Використовуйте веб-інтерфейс.")
+            captcha_count = await captcha_checkbox.count()
+            
+            if captcha_count > 0:
+                print("⚠️ Виявлено капчу! Використовуйте веб-інтерфейс для проходження.")
+                print(f"🌐 Відкрийте веб-інтерфейс і клікніть по капчі")
+                
+                # Чекаємо поки капча зникне (до 5 хвилин)
                 for i in range(300):
                     await asyncio.sleep(1)
-                    # Перевіряємо опрос кожні 10 секунд під час очікування капчі
-                    if i % 10 == 0:
-                        await self._close_survey_if_present()
-                    if await captcha_checkbox.count() == 0:
+                    current_count = await captcha_checkbox.count()
+                    if current_count == 0:
                         print("✓ Капча пройдена!")
                         await self._save_cookies()
+                        await asyncio.sleep(2)  # Даємо час сторінці оновитися
                         break
-        except:
-            pass
+                    
+                    # Кожні 30 секунд нагадуємо
+                    if i > 0 and i % 30 == 0:
+                        print(f"⏳ Очікування капчі... ({i} сек)")
+                
+                # Перевіряємо чи капча дійсно зникла
+                if await captcha_checkbox.count() > 0:
+                    print("❌ Капча не пройдена за 5 хвилин. Спробуйте знову через веб-інтерфейс.")
+                    
+        except Exception as e:
+            print(f"⚠ Помилка при перевірці капчі: {e}")
         
-        await self._random_delay(1500, 2500)
+        await asyncio.sleep(2)
         
-        # Ще раз перевіряємо опрос перед початком роботи
-        await self._close_survey_if_present()
-        
+        # Закриваємо банер якщо є
         try:
             close_btn = self.page.locator('button.m-attention__close')
             if await close_btn.count() > 0:
                 await self._human_move_and_click(close_btn)
+                await asyncio.sleep(1)
         except:
             pass
         
-        # Решта коду заповнення форми залишається без змін...
+        # Заповнюємо форму
         print("Вводжу місто...")
         city_input = self.page.locator('.discon-input-wrapper #city')
-        await city_input.wait_for(state='visible', timeout=10000)
+        await city_input.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(city_input)
         await city_input.clear()
         await asyncio.sleep(0.5)
         await self._human_type(city_input, 'кнаж')
+        await asyncio.sleep(2)
         
         city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
-        await city_option.wait_for(state='visible', timeout=10000)
+        await city_option.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(city_option)
-        await self._random_delay(1000, 1800)
+        await asyncio.sleep(2)
         
+        print("Вводжу вулицю...")
         street_input = self.page.locator('.discon-input-wrapper #street')
-        await street_input.wait_for(state='visible', timeout=10000)
+        await street_input.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(street_input)
         await street_input.clear()
+        await asyncio.sleep(0.5)
         await self._human_type(street_input, 'киЇ')
-        await self._random_delay(1800, 2500)
+        await asyncio.sleep(2)
         
         street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
-        await street_option.wait_for(state='visible', timeout=10000)
+        await street_option.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(street_option)
-        await self._random_delay(1000, 1800)
+        await asyncio.sleep(2)
         
+        print("Вводжу будинок...")
         house_input = self.page.locator('input#house_num')
-        await house_input.wait_for(state='visible', timeout=10000)
+        await house_input.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(house_input)
         await house_input.clear()
+        await asyncio.sleep(0.5)
         await self._human_type(house_input, '168')
-        await self._random_delay(1800, 2500)
+        await asyncio.sleep(2)
         
         house_option = self.page.locator('#house_numautocomplete-list > div:first-child')
-        await house_option.wait_for(state='visible', timeout=10000)
+        await house_option.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(house_option)
-        await self._random_delay(2500, 3500)
+        await asyncio.sleep(3)
         
-        # Фінальна перевірка опросу
+        # Пробуємо закрити опрос якщо з'явився після заповнення
         await self._close_survey_if_present()
         
+        # Отримуємо дату оновлення
         try:
             update_elem = self.page.locator('span.update')
             await update_elem.wait_for(state='visible', timeout=15000)
             self.last_update_date = await update_elem.text_content()
             self.last_update_date = self.last_update_date.strip()
             print(f"✓ Дата оновлення: {self.last_update_date}")
-        except:
+        except Exception as e:
+            print(f"⚠ Не вдалося отримати дату: {e}")
             self.last_update_date = "Невідомо"
         
         print("✅ Сторінка налаштована!")
+        await self._save_cookies()
 
     async def check_for_update(self):
         """Перевіряє чи змінилась дата - оновлена версія"""
@@ -1036,8 +1046,9 @@ class DTEKChecker:
             return screenshot_bytes
 
     async def make_screenshots(self):
-        """Робить скріншоти з парсингом графіка"""
+        """Робить скріншоти з парсингом графіка - стабільна версія"""
         try:
+            # Закриваємо опрос перед початком
             await self._close_survey_if_present()
             await asyncio.sleep(0.5)
             
@@ -1047,8 +1058,10 @@ class DTEKChecker:
             print("="*50)
             
             schedule_today = await self.parse_schedule()
+            print("Роблю скріншот основного графіка...")
             screenshot_main = await self.page.screenshot(full_page=True, type='png')
             screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
+            print("✓ Скріншот основного графіка готовий")
             
             # ЗАВТРА
             print("\n" + "="*50)
@@ -1069,11 +1082,10 @@ class DTEKChecker:
                 
                 await date_selector.click()
                 print("✓ Клікнув на другий графік, чекаю завантаження...")
-                await asyncio.sleep(3)
+                await asyncio.sleep(2)
                 
-                # Закриваємо опрос який міг з'явитись після переключення
+                # Закриваємо опрос якщо з'явився
                 await self._close_survey_if_present()
-                await asyncio.sleep(1)
                 
                 print("Роблю скріншот другого графіка...")
                 schedule_tomorrow = await self.parse_schedule()
@@ -1087,14 +1099,10 @@ class DTEKChecker:
                 await first_date.wait_for(state='visible', timeout=10000)
                 await first_date.click()
                 await asyncio.sleep(2)
-                
-                # Закриваємо опрос після повернення на перший графік
-                await self._close_survey_if_present()
-                
                 print(f"✓ Повернувся на перший графік")
                 
-            except asyncio.TimeoutError as te:
-                print(f"⚠ Таймаут при роботі зі другим графіком: {te}")
+            except asyncio.TimeoutError:
+                print(f"⚠ Таймаут при роботі зі другим графіком")
             except Exception as e:
                 print(f"⚠ Не вдалося отримати другий графік: {e}")
             
