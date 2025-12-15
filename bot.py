@@ -1,2119 +1,1889 @@
+import os
+import re
 import discord
 from discord.ext import commands, tasks
-import asyncio
-from playwright.async_api import async_playwright
-import os
-from datetime import datetime, timedelta
-import io
+from discord import app_commands, ui, Embed, SelectOption
+from typing import List, Dict
 import asyncpg
-from PIL import Image
-from aiohttp import web
-import random
-import json
-import base64
-import hashlib
-import sys
-from collections import deque
+import aiohttp
+import asyncio
+from datetime import datetime, timedelta, time as dtime, timezone
+from bs4 import BeautifulSoup
+import psutil
+from flask import Flask, jsonify
+from threading import Thread
+import time
 
-# Конфігурація
+# === Helper function for UTC time ===
+def utcnow():
+    """Возвращает текущее время в UTC (заменяет устаревший datetime.utcnow())"""
+    return datetime.now(timezone.utc)
+
+# === Config ===
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
-CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID'))
+STEAM_API_KEY = os.getenv('STEAM_API_KEY')
 DATABASE_URL = os.getenv('DATABASE_URL')
-PORT = int(os.getenv('PORT', 10000))
+EPIC_API_URL = 'https://store-site-backend-static.ak.epicgames.com/freeGamesPromotions'
+DISCOUNT_CHANNEL_ID = int(os.getenv('DISCOUNT_CHANNEL_ID', '0'))
+EPIC_CHANNEL_ID = int(os.getenv('EPIC_CHANNEL_ID', '0'))
+LOG_CHANNEL_ID = int(os.getenv('LOG_CHANNEL_ID', '0'))
+PORT = int(os.getenv('PORT', '10000'))
+BIND_TTL_HOURS = int(os.getenv('BIND_TTL_HOURS', '24'))
+CACHE_TTL = timedelta(hours=2)
+VERIFIED_ROLE = "steam verified"
 
-# Database pool
-db_pool = None
+# === Локализация ===
+TEXTS = {
+    'en': {
+        'not_verified': '❌ You need to link your Steam first! Use `/link_steam`',
+        'already_linked': 'ℹ️ You already linked this profile.',
+        'cooldown': '⏳ Try again in {hours}h.',
+        'invalid_url': '❌ Invalid Steam profile URL.',
+        'profile_unavailable': '❌ Profile is unavailable.',
+        'confirm_link': 'Do you want to link profile **{name}** as **{discord_name}**?',
+        'link_success': '✅ Profile `{name}` linked! Loaded {count} games.',
+        'link_cancelled': '❌ Linking cancelled.',
+        'not_your_request': 'This is not your request.',
+        'profile_not_found': 'ℹ️ Profile not found.',
+        'unlink_success': '✅ Profile unlinked.',
+        'no_players': 'Nobody plays this game.',
+        'no_common_games': 'No games found that all players own.',
+        'common_games_title': 'Steam Library - Common Games ({count})',
+        'participants': 'Players',
+        'page': 'Page {current}/{total}',
+        'yes': 'Yes',
+        'no': 'No',
+        'lang_set': '✅ Language set to English',
+        'choose_lang': 'Choose server language:',
+        'cmd_link_steam': 'link_steam',
+        'cmd_link_desc': 'Link your Steam profile',
+        'cmd_link_param': 'Steam profile URL',
+        'cmd_unlink_steam': 'unlink_steam',
+        'cmd_unlink_desc': 'Unlink Steam',
+        'cmd_find_teammates': 'find_teammates',
+        'cmd_find_desc': 'Find players',
+        'cmd_find_param': 'Game name',
+        'cmd_common_games': 'common_games',
+        'cmd_common_desc': 'Show common games',
+        'cmd_common_param': 'User to compare',
+        'hours_visible': '✅ Visible',
+        'hours_hidden': '👁️ Hidden',
+        'sort_alphabetical': '🔤 Alphabetical',
+        'sort_total_hours': '📊 By Total Playtime',
+        'sort_your_hours': "⭐ By {user}'s Playtime",
+        'timeout_expired': '⏰ This menu has expired',
+        'confirmation_expired': '⏰ Confirmation expired',
+        'privacy_note': '🔒 Privacy',
+        'privacy_text': 'Your profile must be **public** to sync games',
+        'profile_info': 'Profile',
+        'next_steps': '📊 Next Steps',
+        'next_steps_text': '• Use `/common_games` to find games with friends\n• Use `/find_teammates` to find players for a game\n• Your games will sync automatically every 24h',
+        'profile_linked': 'Steam Bot • Profile linked',
+        'no_profile': 'ℹ️ No Profile Found',
+        'no_profile_text': "You don't have a Steam profile linked.\n\nUse `/link_steam` to link your profile!",
+        'profile_unlinked_title': '✅ Profile Unlinked',
+        'profile_unlinked_desc': 'Your Steam profile has been successfully unlinked.',
+        'previous_profile': 'Previous profile',
+        'games_removed': '🎮 Games removed',
+        'all_synced': 'All synced games',
+        'role_removed': '🎖️ Role removed',
+        'want_relink': '💡 Want to link again?',
+        'relink_text': 'You can re-link your profile anytime using `/link_steam`',
+        'ranks': '🏅 Ranks',
+        'ranks_text': '🏆 500h+ • 💎 200h+ • ⭐ 100h+ • ✨ 50h+ • 🎯 10h+ • 🆕 <10h',
+        'requested_by': 'Requested by',
+        'note': 'ℹ️ Note',
+        'showing_top': 'Showing top 15 of {total} players',
+        'found_players': 'Found {count} player(s)',
+        'select_game': '🎮 Select a game',
+        'type_to_search': 'Type to search for games...',
+        'no_games_found': 'No games found matching "{query}"',
+        'cmd_invite_player': 'invite_player',
+        'cmd_invite_desc': 'Send a lobby invitation to a player',
+        'cmd_invite_param_user': 'Player to invite',
+        'cmd_invite_param_lobby': 'Steam lobby link (steam://joinlobby/...)',
+        'cmd_create_lobby': 'create_lobby',
+        'cmd_create_lobby_desc': 'Create a public lobby announcement',
+        'cmd_create_lobby_param': 'Steam lobby link (steam://joinlobby/...)',
+        'invalid_lobby_link': '❌ Invalid Steam lobby link! Format: `steam://joinlobby/APPID/LOBBYID/STEAMID`',
+        'game_not_found': '❌ Could not find game information for this lobby.',
+        'invite_sent': '✅ Invitation sent to {user}!',
+        'lobby_created': '✅ Lobby announcement posted!',
+        'invite_title': '🎮 Game Invitation',
+        'invite_description': '**{inviter}** invites you to play **{game}**!',
+        'lobby_title': '🎮 Lobby Open',
+        'lobby_description': '**{creator}** is looking for players in **{game}**!',
+        'join_button': '🎮 Join Lobby',
+        'lobby_info': 'Click the button below to join the lobby',
+        'invitation_from': 'Invitation from',
+        'lobby_by': 'Lobby by',
+        'checking_profile': '🔍 Checking your Steam profile for active lobby...',
+        'no_lobby_found': '❌ No active lobby found in your Steam profile!\n\n**How to fix:**\n1. Create a lobby in your game\n2. Make sure your Steam profile is **public**\n3. Make sure you\'re **in the lobby** when using this command\n4. The game must support Steam lobbies',
+        'profile_private': '❌ Your Steam profile is private!\n\nPlease set your profile to **public** in Steam settings:\nProfile → Edit Profile → Privacy Settings → My Profile: Public',
+        'not_in_game': '❌ You are not currently in a game!\n\nPlease start a game and create a lobby first.',
+        'game_no_lobby': '❌ The game you\'re playing doesn\'t have an active joinable lobby.\n\nMake sure:\n• You created a lobby in the game\n• The lobby is set to "Friends Can Join" or "Public"\n• The game supports Steam lobbies',
+    },
+    'ru': {
+        'not_verified': '❌ Сначала привяжите Steam! Используйте `/привязать_steam`',
+        'already_linked': 'ℹ️ Вы уже привязали этот профиль.',
+        'cooldown': '⏳ Попробуйте снова через {hours}ч.',
+        'invalid_url': '❌ Некорректная ссылка на профиль Steam.',
+        'profile_unavailable': '❌ Профиль недоступен.',
+        'confirm_link': 'Подтверждаете привязку профиля **{name}** как **{discord_name}**?',
+        'link_success': '✅ Профиль `{name}` привязан! Загружено {count} игр.',
+        'link_cancelled': '❌ Привязка отменена.',
+        'not_your_request': 'Это не ваш запрос.',
+        'profile_not_found': 'ℹ️ Профиль не найден.',
+        'unlink_success': '✅ Профиль отвязан.',
+        'no_players': 'Никто не играет в эту игру.',
+        'no_common_games': 'Нет игр, которые есть у всех игроков.',
+        'common_games_title': 'Библиотека Steam - Общие игры ({count})',
+        'participants': 'Игроки',
+        'page': 'Стр. {current}/{total}',
+        'yes': 'Да',
+        'no': 'Нет',
+        'lang_set': '✅ Язык установлен: Русский',
+        'choose_lang': 'Выберите язык сервера:',
+        'cmd_link_steam': 'привязать_steam',
+        'cmd_link_desc': 'Привязать профиль Steam',
+        'cmd_link_param': 'Ссылка на профиль Steam',
+        'cmd_unlink_steam': 'отвязать_steam',
+        'cmd_unlink_desc': 'Отвязать Steam',
+        'cmd_find_teammates': 'найти_тиммейтов',
+        'cmd_find_desc': 'Найти игроков',
+        'cmd_find_param': 'Название игры',
+        'cmd_common_games': 'общие_игры',
+        'cmd_common_desc': 'Показать общие игры',
+        'cmd_common_param': 'Пользователь для сравнения',
+        'hours_visible': '✅ Видимо',
+        'hours_hidden': '👁️ Скрыто',
+        'sort_alphabetical': '🔤 По алфавиту',
+        'sort_total_hours': '📊 По общему времени',
+        'sort_your_hours': "⭐ По времени {user}",
+        'timeout_expired': '⏰ Это меню истекло',
+        'confirmation_expired': '⏰ Подтверждение истекло',
+        'privacy_note': '🔒 Приватность',
+        'privacy_text': 'Ваш профиль должен быть **публичным** для синхронизации игр',
+        'profile_info': 'Профиль',
+        'next_steps': '📊 Следующие шаги',
+        'next_steps_text': '• Используйте `/общие_игры` для поиска игр с друзьями\n• Используйте `/найти_тиммейтов` для поиска игроков\n• Ваши игры будут синхронизироваться автоматически каждые 24ч',
+        'profile_linked': 'Steam Bot • Профиль привязан',
+        'no_profile': 'ℹ️ Профиль не найден',
+        'no_profile_text': "У вас нет привязанного профиля Steam.\n\nИспользуйте `/привязать_steam` для привязки!",
+        'profile_unlinked_title': '✅ Профиль отвязан',
+        'profile_unlinked_desc': 'Ваш профиль Steam успешно отвязан.',
+        'previous_profile': 'Предыдущий профиль',
+        'games_removed': '🎮 Игры удалены',
+        'all_synced': 'Все синхронизированные игры',
+        'role_removed': '🎖️ Роль удалена',
+        'want_relink': '💡 Хотите привязать снова?',
+        'relink_text': 'Вы можете перепривязать профиль в любое время используя `/привязать_steam`',
+        'ranks': '🏅 Ранги',
+        'ranks_text': '🏆 500ч+ • 💎 200ч+ • ⭐ 100ч+ • ✨ 50ч+ • 🎯 10ч+ • 🆕 <10ч',
+        'requested_by': 'Запросил',
+        'note': 'ℹ️ Примечание',
+        'showing_top': 'Показано топ 15 из {total} игроков',
+        'found_players': 'Найдено {count} игрок(ов)',
+        'select_game': '🎮 Выберите игру',
+        'type_to_search': 'Начните вводить название игры...',
+        'no_games_found': 'Не найдено игр по запросу "{query}"',
+        'cmd_invite_player': 'пригласить_игрока',
+        'cmd_invite_desc': 'Отправить приглашение в лобби игроку',
+        'cmd_invite_param_user': 'Игрок для приглашения',
+        'cmd_invite_param_lobby': 'Ссылка на лобби Steam (steam://joinlobby/...)',
+        'cmd_create_lobby': 'создать_лобби',
+        'cmd_create_lobby_desc': 'Создать публичное объявление о лобби',
+        'cmd_create_lobby_param': 'Ссылка на лобби Steam (steam://joinlobby/...)',
+        'invalid_lobby_link': '❌ Неверная ссылка на лобби Steam! Формат: `steam://joinlobby/APPID/LOBBYID/STEAMID`',
+        'game_not_found': '❌ Не удалось найти информацию об игре для этого лобби.',
+        'invite_sent': '✅ Приглашение отправлено {user}!',
+        'lobby_created': '✅ Объявление о лобби опубликовано!',
+        'invite_title': '🎮 Приглашение в игру',
+        'invite_description': '**{inviter}** приглашает вас поиграть в **{game}**!',
+        'lobby_title': '🎮 Лобби открыто',
+        'lobby_description': '**{creator}** ищет игроков в **{game}**!',
+        'join_button': '🎮 Присоединиться к лобби',
+        'lobby_info': 'Нажмите на кнопку ниже, чтобы присоединиться к лобби',
+        'invitation_from': 'Приглашение от',
+        'lobby_by': 'Лобби создал',
+        'checking_profile': '🔍 Проверяю ваш профиль Steam на активное лобби...',
+        'no_lobby_found': '❌ Активное лобби не найдено в вашем профиле Steam!\n\n**Как исправить:**\n1. Создайте лобби в игре\n2. Убедитесь что ваш профиль Steam **публичный**\n3. Убедитесь что вы **в лобби** при использовании команды\n4. Игра должна поддерживать Steam лобби',
+        'profile_private': '❌ Ваш профиль Steam приватный!\n\nПожалуйста, установите профиль как **публичный** в настройках Steam:\nПрофиль → Редактировать профиль → Настройки приватности → Мой профиль: Публичный',
+        'not_in_game': '❌ Вы сейчас не в игре!\n\nПожалуйста, запустите игру и создайте лобби сначала.',
+        'game_no_lobby': '❌ В игре, в которую вы играете, нет активного доступного лобби.\n\nУбедитесь что:\n• Вы создали лобби в игре\n• Лобби установлено как "Друзья могут присоединиться" или "Публичное"\n• Игра поддерживает Steam лобби',
+    },
+    'ua': {
+        'not_verified': "❌ Спочатку прив'яжіть Steam! Використовуйте `/привязати_steam`",
+        'already_linked': "ℹ️ Ви вже прив'язали цей профіль.",
+        'cooldown': '⏳ Спробуйте знову через {hours}год.',
+        'invalid_url': '❌ Некоректне посилання на профіль Steam.',
+        'profile_unavailable': '❌ Профіль недоступний.',
+        'confirm_link': "Підтверджуєте прив'язку профілю **{name}** як **{discord_name}**?",
+        'link_success': "✅ Профіль `{name}` прив'язано! Завантажено {count} ігор.",
+        'link_cancelled': "❌ Прив'язку скасовано.",
+        'not_your_request': 'Це не ваш запит.',
+        'profile_not_found': 'ℹ️ Профіль не знайдено.',
+        'unlink_success': "✅ Профіль відв'язано.",
+        'no_players': 'Ніхто не грає в цю гру.',
+        'no_common_games': 'Немає ігор, які є у всіх гравців.',
+        'common_games_title': 'Бібліотека Steam - Спільні ігри ({count})',
+        'participants': 'Гравці',
+        'page': 'Стор. {current}/{total}',
+        'yes': 'Так',
+        'no': 'Ні',
+        'lang_set': '✅ Мову встановлено: Українська',
+        'choose_lang': 'Оберіть мову сервера:',
+        'cmd_link_steam': 'привязати_steam',
+        'cmd_link_desc': "Прив'язати профіль Steam",
+        'cmd_link_param': 'Посилання на профіль Steam',
+        'cmd_unlink_steam': 'відвязати_steam',
+        'cmd_unlink_desc': "Від'язати Steam",
+        'cmd_find_teammates': 'знайти_тіммейтів',
+        'cmd_find_desc': 'Знайти гравців',
+        'cmd_find_param': 'Назва гри',
+        'cmd_common_games': 'спільні_ігри',
+        'cmd_common_desc': 'Показати спільні ігри',
+        'cmd_common_param': 'Користувач для порівняння',
+        'hours_visible': '✅ Видимо',
+        'hours_hidden': '👁️ Приховано',
+        'sort_alphabetical': '🔤 За алфавітом',
+        'sort_total_hours': '📊 За загальним часом',
+        'sort_your_hours': "⭐ За часом {user}",
+        'timeout_expired': '⏰ Це меню закінчилось',
+        'confirmation_expired': '⏰ Підтвердження закінчилось',
+        'privacy_note': '🔒 Приватність',
+        'privacy_text': 'Ваш профіль має бути **публічним** для синхронізації ігор',
+        'profile_info': 'Профіль',
+        'next_steps': '📊 Наступні кроки',
+        'next_steps_text': '• Використовуйте `/спільні_ігри` для пошуку ігор з друзями\n• Використовуйте `/знайти_тіммейтів` для пошуку гравців\n• Ваші ігри будуть синхронізуватись автоматично кожні 24г',
+        'profile_linked': "Steam Bot • Профіль прив'язано",
+        'no_profile': 'ℹ️ Профіль не знайдено',
+        'no_profile_text': "У вас немає прив'язаного профілю Steam.\n\nВикористовуйте `/привязати_steam` для прив'язки!",
+        'profile_unlinked_title': "✅ Профіль відв'язано",
+        'profile_unlinked_desc': "Ваш профіль Steam успішно відв'язано.",
+        'previous_profile': 'Попередній профіль',
+        'games_removed': '🎮 Ігри видалено',
+        'all_synced': 'Всі синхронізовані ігри',
+        'role_removed': '🎖️ Роль видалено',
+        'want_relink': "💡 Хочете прив'язати знову?",
+        'relink_text': "Ви можете перепривʼязати профіль в будь-який час використовуючи `/привязати_steam`",
+        'ranks': '🏅 Ранги',
+        'ranks_text': '🏆 500г+ • 💎 200г+ • ⭐ 100г+ • ✨ 50г+ • 🎯 10г+ • 🆕 <10г',
+        'requested_by': 'Запитав',
+        'note': 'ℹ️ Примітка',
+        'showing_top': 'Показано топ 15 з {total} гравців',
+        'found_players': 'Знайдено {count} гравець(ів)',
+        'select_game': '🎮 Оберіть гру',
+        'type_to_search': 'Почніть вводити назву гри...',
+        'no_games_found': 'Не знайдено ігор за запитом "{query}"',
+        'cmd_invite_player': 'запросити_гравця',
+        'cmd_invite_desc': 'Надіслати запрошення в лобі гравцю',
+        'cmd_invite_param_user': 'Гравець для запрошення',
+        'cmd_invite_param_lobby': 'Посилання на лобі Steam (steam://joinlobby/...)',
+        'cmd_create_lobby': 'створити_лобі',
+        'cmd_create_lobby_desc': 'Створити публічне оголошення про лобі',
+        'cmd_create_lobby_param': 'Посилання на лобі Steam (steam://joinlobby/...)',
+        'invalid_lobby_link': '❌ Невірне посилання на лобі Steam! Формат: `steam://joinlobby/APPID/LOBBYID/STEAMID`',
+        'game_not_found': '❌ Не вдалося знайти інформацію про гру для цього лобі.',
+        'invite_sent': '✅ Запрошення надіслано {user}!',
+        'lobby_created': '✅ Оголошення про лобі опубліковано!',
+        'invite_title': '🎮 Запрошення в гру',
+        'invite_description': '**{inviter}** запрошує вас пограти в **{game}**!',
+        'lobby_title': '🎮 Лобі відкрито',
+        'lobby_description': '**{creator}** шукає гравців в **{game}**!',
+        'join_button': '🎮 Приєднатися до лобі',
+        'lobby_info': 'Натисніть на кнопку нижче, щоб приєднатися до лобі',
+        'invitation_from': 'Запрошення від',
+        'lobby_by': 'Лобі створив',
+        'checking_profile': '🔍 Перевіряю ваш профіль Steam на активне лобі...',
+        'no_lobby_found': '❌ Активне лобі не знайдено у вашому профілі Steam!\n\n**Як виправити:**\n1. Створіть лобі в грі\n2. Переконайтесь що ваш профіль Steam **публічний**\n3. Переконайтесь що ви **в лобі** при використанні команди\n4. Гра повинна підтримувати Steam лобі',
+        'profile_private': '❌ Ваш профіль Steam приватний!\n\nБудь ласка, встановіть профіль як **публічний** в налаштуваннях Steam:\nПрофіль → Редагувати профіль → Налаштування приватності → Мій профіль: Публічний',
+        'not_in_game': '❌ Ви зараз не в грі!\n\nБудь ласка, запустіть гру і створіть лобі спочатку.',
+        'game_no_lobby': '❌ У грі, в яку ви граєте, немає активного доступного лобі.\n\nПереконайтесь що:\n• Ви створили лобі в грі\n• Лобі встановлено як "Друзі можуть приєднатися" або "Публічне"\n• Гра підтримує Steam лобі',
+    }
+}
 
-# Логування в пам'яті для веб-інтерфейсу
-log_buffer = deque(maxlen=500)  # Зберігаємо останні 500 логів
+# === Intents ===
+INTENTS = discord.Intents.default()
+INTENTS.members = True
+INTENTS.presences = True
+INTENTS.message_content = True
+INTENTS.reactions = True
 
-def log(message):
-    """Логування з виводом в консоль і збереженням для веб-інтерфейсу"""
-    timestamp = datetime.now().strftime('%H:%M:%S')
-    log_entry = f"[{timestamp}] {message}"
-    print(log_entry)
-    log_buffer.append(log_entry)
-    sys.stdout.flush()
+# === Bot Setup ===
+bot = commands.Bot(command_prefix='/', intents=INTENTS)
+db_pool: asyncpg.Pool = None
 
-# Створення бота
-intents = discord.Intents.default()
-intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)
+# === Cache ===
+steam_cache = {}
+PAGINATION_VIEWS = {}
+server_langs = {}
 
-async def init_db_pool():
-    """Ініціалізація connection pool для PostgreSQL"""
-    global db_pool
-    if not db_pool:
-        db_pool = await asyncpg.create_pool(
-            DATABASE_URL,
-            min_size=1,
-            max_size=10,
-            command_timeout=60
-        )
-        log("✓ Database pool створено")
-        
-        # Створюємо таблицю якщо не існує
-        async with db_pool.acquire() as conn:
-            await conn.execute('''
-                CREATE TABLE IF NOT EXISTS dtek_checks (
-                    id SERIAL PRIMARY KEY,
-                    update_date TEXT,
-                    schedule_hash TEXT,
-                    schedule_data JSONB,
-                    created_at TIMESTAMP DEFAULT NOW()
-                )
-            ''')
-        log("✓ Таблиця БД готова")
+# === Flask Keep-Alive ===
+app = Flask(__name__)
+bot_ready = False
 
-async def close_db_pool():
-    """Закриття connection pool"""
-    global db_pool
-    if db_pool:
-        await db_pool.close()
-        log("✓ Database pool закрито")
-
-# HTTP сервер для Render health checks + VNC interface
-async def handle_health(request):
-    """Health check endpoint"""
-    return web.Response(text="OK", status=200)
-
-async def handle_root(request):
-    """Root endpoint - VNC interface"""
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>DTEK Bot Remote Control</title>
-        <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                min-height: 100vh;
-                padding: 20px;
-            }
-            .container {
-                max-width: 1800px;
-                margin: 0 auto;
-                display: grid;
-                grid-template-columns: 1fr 400px;
-                gap: 20px;
-            }
-            
-            .left-panel {
-                display: flex;
-                flex-direction: column;
-                gap: 20px;
-            }
-            
-            .right-panel {
-                display: flex;
-                flex-direction: column;
-                gap: 20px;
-                position: sticky;
-                top: 20px;
-                height: fit-content;
-            }
-            
-            .header {
-                text-align: center;
-                color: white;
-                margin-bottom: 30px;
-                grid-column: 1 / -1;
-            }
-            .header h1 {
-                font-size: 2.5em;
-                margin-bottom: 10px;
-                text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-            }
-            .status {
-                display: inline-block;
-                padding: 8px 20px;
-                background: rgba(255,255,255,0.2);
-                border-radius: 20px;
-                font-size: 14px;
-                backdrop-filter: blur(10px);
-            }
-            .status.online { background: rgba(76, 175, 80, 0.3); }
-            .status.offline { background: rgba(244, 67, 54, 0.3); }
-            
-            .control-panel, .viewer, .info-panel, .instructions, .logs-panel {
-                background: white;
-                border-radius: 15px;
-                padding: 20px;
-                box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-            }
-            
-            .control-panel h2, .viewer h2, .info-panel h2, .instructions h3, .logs-panel h2 {
-                margin-bottom: 15px;
-                color: #333;
-            }
-            
-            .buttons {
-                display: flex;
-                gap: 10px;
-                flex-wrap: wrap;
-            }
-            button {
-                padding: 12px 24px;
-                border: none;
-                border-radius: 8px;
-                cursor: pointer;
-                font-size: 14px;
-                font-weight: 600;
-                transition: all 0.3s;
-                box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            }
-            button:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 6px 12px rgba(0,0,0,0.15);
-            }
-            button:active {
-                transform: translateY(0);
-            }
-            .btn-primary {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-            }
-            .btn-success {
-                background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);
-                color: white;
-            }
-            .btn-danger {
-                background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
-                color: white;
-            }
-            .btn-info {
-                background: linear-gradient(135deg, #3a7bd5 0%, #00d2ff 100%);
-                color: white;
-            }
-            
-            .screenshot-container {
-                position: relative;
-                width: 100%;
-                background: #f0f0f0;
-                border-radius: 10px;
-                overflow: hidden;
-                min-height: 600px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-            }
-            #screenshot {
-                width: 100%;
-                height: auto;
-                display: block;
-                cursor: crosshair;
-            }
-            .loading {
-                position: absolute;
-                top: 50%;
-                left: 50%;
-                transform: translate(-50%, -50%);
-                text-align: center;
-                color: #999;
-            }
-            .spinner {
-                border: 4px solid #f3f3f3;
-                border-top: 4px solid #667eea;
-                border-radius: 50%;
-                width: 50px;
-                height: 50px;
-                animation: spin 1s linear infinite;
-                margin: 0 auto 10px;
-            }
-            @keyframes spin {
-                0% { transform: rotate(0deg); }
-                100% { transform: rotate(360deg); }
-            }
-            
-            .coordinates {
-                position: absolute;
-                bottom: 10px;
-                left: 10px;
-                background: rgba(0,0,0,0.7);
-                color: white;
-                padding: 8px 12px;
-                border-radius: 5px;
-                font-family: monospace;
-                font-size: 12px;
-            }
-            
-            .info-grid {
-                display: grid;
-                grid-template-columns: repeat(2, 1fr);
-                gap: 15px;
-            }
-            .info-card {
-                background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-                padding: 15px;
-                border-radius: 10px;
-            }
-            .info-card h3 {
-                font-size: 14px;
-                color: #666;
-                margin-bottom: 5px;
-            }
-            .info-card p {
-                font-size: 18px;
-                font-weight: bold;
-                color: #333;
-            }
-            
-            .instructions {
-                background: rgba(255, 255, 255, 0.95);
-                border-left: 4px solid #667eea;
-            }
-            .instructions ul {
-                margin-left: 20px;
-                line-height: 1.8;
-            }
-            
-            /* Логи */
-            .logs-panel {
-                max-height: calc(100vh - 100px);
-                display: flex;
-                flex-direction: column;
-            }
-            .logs-header {
-                display: flex;
-                justify-content: space-between;
-                align-items: center;
-                margin-bottom: 10px;
-            }
-            .logs-container {
-                background: #1e1e1e;
-                border-radius: 8px;
-                padding: 15px;
-                font-family: 'Courier New', monospace;
-                font-size: 12px;
-                color: #00ff00;
-                overflow-y: auto;
-                flex: 1;
-                max-height: 70vh;
-            }
-            .log-entry {
-                margin-bottom: 5px;
-                line-height: 1.4;
-                word-wrap: break-word;
-            }
-            .log-entry:hover {
-                background: rgba(255,255,255,0.1);
-            }
-            .logs-container::-webkit-scrollbar {
-                width: 8px;
-            }
-            .logs-container::-webkit-scrollbar-track {
-                background: #2d2d2d;
-                border-radius: 4px;
-            }
-            .logs-container::-webkit-scrollbar-thumb {
-                background: #667eea;
-                border-radius: 4px;
-            }
-            .clear-logs-btn {
-                padding: 6px 12px;
-                font-size: 12px;
-                background: #f44336;
-                color: white;
-                border: none;
-                border-radius: 5px;
-                cursor: pointer;
-            }
-            
-            @media (max-width: 1400px) {
-                .container {
-                    grid-template-columns: 1fr;
-                }
-                .right-panel {
-                    position: relative;
-                }
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1>🤖 DTEK Bot Remote Control</h1>
-                <span class="status" id="status">⚪ Connecting...</span>
-            </div>
-            
-            <div class="left-panel">
-                <div class="instructions">
-                    <h3>📖 Як використовувати:</h3>
-                    <ul>
-                        <li><strong>Клікайте по скріншоту</strong> - кліки передаються в браузер бота</li>
-                        <li><strong>Оновити скріншот</strong> - отримати актуальне зображення</li>
-                        <li><strong>Пройти капчу</strong> - клікайте по елементам капчі прямо на скріншоті</li>
-                        <li>Скріншоти оновлюються автоматично кожні 3 секунди</li>
-                        <li><strong>Логи справа</strong> - показують що робить бот в реальному часі</li>
-                    </ul>
-                </div>
-                
-                <div class="control-panel">
-                    <h2>🎮 Панель управління</h2>
-                    <div class="buttons">
-                        <button class="btn-primary" onclick="refreshScreenshot()">🔄 Оновити скріншот</button>
-                        <button class="btn-success" onclick="initBrowser()">🚀 Ініціалізувати браузер</button>
-                        <button class="btn-info" onclick="manualCheck()">✅ Зробити перевірку</button>
-                        <button class="btn-danger" onclick="clearCookies()">🍪 Очистити куки</button>
-                    </div>
-                </div>
-                
-                <div class="viewer">
-                    <h2>👁️ Віддалений перегляд браузера</h2>
-                    <div class="screenshot-container">
-                        <div class="loading" id="loading">
-                            <div class="spinner"></div>
-                            <p>Загрузка...</p>
-                        </div>
-                        <img id="screenshot" style="display: none;" onclick="handleClick(event)">
-                        <div class="coordinates" id="coords">X: 0, Y: 0</div>
-                    </div>
-                </div>
-                
-                <div class="info-panel">
-                    <h2>📊 Статус бота</h2>
-                    <div class="info-grid">
-                        <div class="info-card">
-                            <h3>Браузер</h3>
-                            <p id="browser-status">-</p>
-                        </div>
-                        <div class="info-card">
-                            <h3>Остання дата</h3>
-                            <p id="last-update">-</p>
-                        </div>
-                        <div class="info-card">
-                            <h3>Куки</h3>
-                            <p id="cookies-status">-</p>
-                        </div>
-                        <div class="info-card">
-                            <h3>Останнє оновлення</h3>
-                            <p id="last-refresh">-</p>
-                        </div>
-                    </div>
-                </div>
-            </div>
-            
-            <div class="right-panel">
-                <div class="logs-panel">
-                    <div class="logs-header">
-                        <h2>📋 Логи бота</h2>
-                        <button class="clear-logs-btn" onclick="clearLogsDisplay()">🗑️ Очистити</button>
-                    </div>
-                    <div class="logs-container" id="logs">
-                        <div class="log-entry">Завантаження логів...</div>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <script>
-            let autoRefresh = null;
-            let imageNaturalWidth = 0;
-            let imageNaturalHeight = 0;
-            let logsAutoScroll = true;
-            
-            async function request(endpoint, method = 'GET', body = null) {
-                const options = { method };
-                if (body) {
-                    options.headers = { 'Content-Type': 'application/json' };
-                    options.body = JSON.stringify(body);
-                }
-                const response = await fetch(endpoint, options);
-                return await response.json();
-            }
-            
-            async function refreshScreenshot() {
-                try {
-                    const data = await request('/api/screenshot');
-                    if (data.screenshot) {
-                        const img = document.getElementById('screenshot');
-                        img.src = 'data:image/png;base64,' + data.screenshot;
-                        img.style.display = 'block';
-                        document.getElementById('loading').style.display = 'none';
-                        
-                        img.onload = function() {
-                            imageNaturalWidth = img.naturalWidth;
-                            imageNaturalHeight = img.naturalHeight;
-                        };
-                        
-                        document.getElementById('last-refresh').textContent = new Date().toLocaleTimeString();
-                    }
-                } catch (e) {
-                    console.error('Error refreshing screenshot:', e);
-                }
-            }
-            
-            async function initBrowser() {
-                document.getElementById('status').textContent = '⏳ Ініціалізація...';
-                try {
-                    const data = await request('/api/init');
-                    alert(data.message);
-                    await updateStatus();
-                    await refreshScreenshot();
-                } catch (e) {
-                    alert('Помилка: ' + e.message);
-                }
-            }
-            
-            async function manualCheck() {
-                document.getElementById('status').textContent = '⏳ Перевірка...';
-                try {
-                    const data = await request('/api/check');
-                    alert(data.message);
-                    await refreshScreenshot();
-                } catch (e) {
-                    alert('Помилка: ' + e.message);
-                }
-            }
-            
-            async function clearCookies() {
-                try {
-                    const data = await request('/api/clear-cookies', 'POST');
-                    alert(data.message);
-                    await updateStatus();
-                } catch (e) {
-                    alert('Помилка: ' + e.message);
-                }
-            }
-            
-            async function handleClick(event) {
-                const img = event.target;
-                const rect = img.getBoundingClientRect();
-                
-                const scaleX = imageNaturalWidth / rect.width;
-                const scaleY = imageNaturalHeight / rect.height;
-                
-                const x = Math.round((event.clientX - rect.left) * scaleX);
-                const y = Math.round((event.clientY - rect.top) * scaleY);
-                
-                console.log(`Click: ${x}, ${y}`);
-                
-                try {
-                    const data = await request('/api/click', 'POST', { x, y });
-                    console.log(data.message);
-                    setTimeout(refreshScreenshot, 1000);
-                } catch (e) {
-                    console.error('Click error:', e);
-                }
-            }
-            
-            document.getElementById('screenshot').addEventListener('mousemove', (e) => {
-                const img = e.target;
-                const rect = img.getBoundingClientRect();
-                const scaleX = imageNaturalWidth / rect.width;
-                const scaleY = imageNaturalHeight / rect.height;
-                const x = Math.round((e.clientX - rect.left) * scaleX);
-                const y = Math.round((e.clientY - rect.top) * scaleY);
-                document.getElementById('coords').textContent = `X: ${x}, Y: ${y}`;
-            });
-            
-            async function updateStatus() {
-                try {
-                    const data = await request('/api/status');
-                    
-                    document.getElementById('browser-status').textContent = data.browser;
-                    document.getElementById('last-update').textContent = data.last_update || '-';
-                    document.getElementById('cookies-status').textContent = data.cookies;
-                    
-                    const statusElem = document.getElementById('status');
-                    if (data.browser === '✅ Відкритий') {
-                        statusElem.className = 'status online';
-                        statusElem.textContent = '🟢 Online';
-                    } else {
-                        statusElem.className = 'status offline';
-                        statusElem.textContent = '🔴 Offline';
-                    }
-                } catch (e) {
-                    console.error('Status update error:', e);
-                }
-            }
-            
-            async function updateLogs() {
-                try {
-                    const data = await request('/api/logs');
-                    const logsContainer = document.getElementById('logs');
-                    
-                    if (data.logs && data.logs.length > 0) {
-                        const shouldScroll = logsContainer.scrollHeight - logsContainer.scrollTop <= logsContainer.clientHeight + 50;
-                        
-                        logsContainer.innerHTML = data.logs.map(log => 
-                            `<div class="log-entry">${escapeHtml(log)}</div>`
-                        ).join('');
-                        
-                        if (shouldScroll && logsAutoScroll) {
-                            logsContainer.scrollTop = logsContainer.scrollHeight;
-                        }
-                    }
-                } catch (e) {
-                    console.error('Logs update error:', e);
-                }
-            }
-            
-            function escapeHtml(text) {
-                const div = document.createElement('div');
-                div.textContent = text;
-                return div.innerHTML;
-            }
-            
-            function clearLogsDisplay() {
-                document.getElementById('logs').innerHTML = '<div class="log-entry">Логи очищено локально</div>';
-            }
-            
-            // Відстежуємо scroll для автопрокрутки
-            document.getElementById('logs').addEventListener('scroll', (e) => {
-                const container = e.target;
-                logsAutoScroll = container.scrollHeight - container.scrollTop <= container.clientHeight + 50;
-            });
-            
-            function startAutoRefresh() {
-                autoRefresh = setInterval(() => {
-                    refreshScreenshot();
-                    updateStatus();
-                    updateLogs();
-                }, 3000);
-            }
-            
-            window.onload = async () => {
-                await updateStatus();
-                await updateLogs();
-                await refreshScreenshot();
-                startAutoRefresh();
-            };
-        </script>
-    </body>
-    </html>
-    """
-    return web.Response(text=html, content_type='text/html')
-    """Root endpoint - VNC interface"""
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>DTEK Bot Remote Control</title>
-        <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                min-height: 100vh;
-                padding: 20px;
-            }
-            .container {
-                max-width: 1400px;
-                margin: 0 auto;
-            }
-            .header {
-                text-align: center;
-                color: white;
-                margin-bottom: 30px;
-            }
-            .header h1 {
-                font-size: 2.5em;
-                margin-bottom: 10px;
-                text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-            }
-            .status {
-                display: inline-block;
-                padding: 8px 20px;
-                background: rgba(255,255,255,0.2);
-                border-radius: 20px;
-                font-size: 14px;
-                backdrop-filter: blur(10px);
-            }
-            .status.online { background: rgba(76, 175, 80, 0.3); }
-            .status.offline { background: rgba(244, 67, 54, 0.3); }
-            
-            .control-panel {
-                background: white;
-                border-radius: 15px;
-                padding: 20px;
-                margin-bottom: 20px;
-                box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-            }
-            .control-panel h2 {
-                margin-bottom: 15px;
-                color: #333;
-            }
-            .buttons {
-                display: flex;
-                gap: 10px;
-                flex-wrap: wrap;
-            }
-            button {
-                padding: 12px 24px;
-                border: none;
-                border-radius: 8px;
-                cursor: pointer;
-                font-size: 14px;
-                font-weight: 600;
-                transition: all 0.3s;
-                box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            }
-            button:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 6px 12px rgba(0,0,0,0.15);
-            }
-            button:active {
-                transform: translateY(0);
-            }
-            .btn-primary {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-            }
-            .btn-success {
-                background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);
-                color: white;
-            }
-            .btn-danger {
-                background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
-                color: white;
-            }
-            .btn-info {
-                background: linear-gradient(135deg, #3a7bd5 0%, #00d2ff 100%);
-                color: white;
-            }
-            
-            .viewer {
-                background: white;
-                border-radius: 15px;
-                padding: 20px;
-                box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-                position: relative;
-            }
-            .viewer h2 {
-                margin-bottom: 15px;
-                color: #333;
-            }
-            .screenshot-container {
-                position: relative;
-                width: 100%;
-                background: #f0f0f0;
-                border-radius: 10px;
-                overflow: hidden;
-                min-height: 600px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-            }
-            #screenshot {
-                width: 100%;
-                height: auto;
-                display: block;
-                cursor: crosshair;
-            }
-            .loading {
-                position: absolute;
-                top: 50%;
-                left: 50%;
-                transform: translate(-50%, -50%);
-                text-align: center;
-                color: #999;
-            }
-            .spinner {
-                border: 4px solid #f3f3f3;
-                border-top: 4px solid #667eea;
-                border-radius: 50%;
-                width: 50px;
-                height: 50px;
-                animation: spin 1s linear infinite;
-                margin: 0 auto 10px;
-            }
-            @keyframes spin {
-                0% { transform: rotate(0deg); }
-                100% { transform: rotate(360deg); }
-            }
-            
-            .coordinates {
-                position: absolute;
-                bottom: 10px;
-                left: 10px;
-                background: rgba(0,0,0,0.7);
-                color: white;
-                padding: 8px 12px;
-                border-radius: 5px;
-                font-family: monospace;
-                font-size: 12px;
-            }
-            
-            .info-panel {
-                background: white;
-                border-radius: 15px;
-                padding: 20px;
-                margin-top: 20px;
-                box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-            }
-            .info-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-                gap: 15px;
-            }
-            .info-card {
-                background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-                padding: 15px;
-                border-radius: 10px;
-            }
-            .info-card h3 {
-                font-size: 14px;
-                color: #666;
-                margin-bottom: 5px;
-            }
-            .info-card p {
-                font-size: 18px;
-                font-weight: bold;
-                color: #333;
-            }
-            
-            .instructions {
-                background: rgba(255, 255, 255, 0.95);
-                padding: 20px;
-                border-radius: 10px;
-                margin-bottom: 20px;
-                border-left: 4px solid #667eea;
-            }
-            .instructions h3 {
-                color: #667eea;
-                margin-bottom: 10px;
-            }
-            .instructions ul {
-                margin-left: 20px;
-                line-height: 1.8;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1>🤖 DTEK Bot Remote Control</h1>
-                <span class="status" id="status">⚪ Connecting...</span>
-            </div>
-            
-            <div class="instructions">
-                <h3>📖 Як використовувати:</h3>
-                <ul>
-                    <li><strong>Клікайте по скріншоту</strong> - кліки передаються в браузер бота</li>
-                    <li><strong>Оновити скріншот</strong> - отримати актуальне зображення</li>
-                    <li><strong>Пройти капчу</strong> - клікайте по елементам капчі прямо на скріншоті</li>
-                    <li>Скріншоти оновлюються автоматично кожні 3 секунди</li>
-                </ul>
-            </div>
-            
-            <div class="control-panel">
-                <h2>🎮 Панель управління</h2>
-                <div class="buttons">
-                    <button class="btn-primary" onclick="refreshScreenshot()">🔄 Оновити скріншот</button>
-                    <button class="btn-success" onclick="initBrowser()">🚀 Ініціалізувати браузер</button>
-                    <button class="btn-info" onclick="manualCheck()">✅ Зробити перевірку</button>
-                    <button class="btn-danger" onclick="clearCookies()">🍪 Очистити куки</button>
-                </div>
-            </div>
-            
-            <div class="viewer">
-                <h2>👁️ Віддалений перегляд браузера</h2>
-                <div class="screenshot-container">
-                    <div class="loading" id="loading">
-                        <div class="spinner"></div>
-                        <p>Загрузка...</p>
-                    </div>
-                    <img id="screenshot" style="display: none;" onclick="handleClick(event)">
-                    <div class="coordinates" id="coords">X: 0, Y: 0</div>
-                </div>
-            </div>
-            
-            <div class="info-panel">
-                <h2>📊 Статус бота</h2>
-                <div class="info-grid">
-                    <div class="info-card">
-                        <h3>Браузер</h3>
-                        <p id="browser-status">-</p>
-                    </div>
-                    <div class="info-card">
-                        <h3>Остання дата</h3>
-                        <p id="last-update">-</p>
-                    </div>
-                    <div class="info-card">
-                        <h3>Куки</h3>
-                        <p id="cookies-status">-</p>
-                    </div>
-                    <div class="info-card">
-                        <h3>Останнє оновлення</h3>
-                        <p id="last-refresh">-</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <script>
-            let autoRefresh = null;
-            let imageNaturalWidth = 0;
-            let imageNaturalHeight = 0;
-            
-            async function request(endpoint, method = 'GET', body = null) {
-                const options = { method };
-                if (body) {
-                    options.headers = { 'Content-Type': 'application/json' };
-                    options.body = JSON.stringify(body);
-                }
-                const response = await fetch(endpoint, options);
-                return await response.json();
-            }
-            
-            async function refreshScreenshot() {
-                try {
-                    const data = await request('/api/screenshot');
-                    if (data.screenshot) {
-                        const img = document.getElementById('screenshot');
-                        img.src = 'data:image/png;base64,' + data.screenshot;
-                        img.style.display = 'block';
-                        document.getElementById('loading').style.display = 'none';
-                        
-                        img.onload = function() {
-                            imageNaturalWidth = img.naturalWidth;
-                            imageNaturalHeight = img.naturalHeight;
-                        };
-                        
-                        document.getElementById('last-refresh').textContent = new Date().toLocaleTimeString();
-                    }
-                } catch (e) {
-                    console.error('Error refreshing screenshot:', e);
-                }
-            }
-            
-            async function initBrowser() {
-                document.getElementById('status').textContent = '⏳ Ініціалізація...';
-                try {
-                    const data = await request('/api/init');
-                    alert(data.message);
-                    await updateStatus();
-                    await refreshScreenshot();
-                } catch (e) {
-                    alert('Помилка: ' + e.message);
-                }
-            }
-            
-            async function manualCheck() {
-                document.getElementById('status').textContent = '⏳ Перевірка...';
-                try {
-                    const data = await request('/api/check');
-                    alert(data.message);
-                    await refreshScreenshot();
-                } catch (e) {
-                    alert('Помилка: ' + e.message);
-                }
-            }
-            
-            async function clearCookies() {
-                try {
-                    const data = await request('/api/clear-cookies', 'POST');
-                    alert(data.message);
-                    await updateStatus();
-                } catch (e) {
-                    alert('Помилка: ' + e.message);
-                }
-            }
-            
-            async function handleClick(event) {
-                const img = event.target;
-                const rect = img.getBoundingClientRect();
-                
-                const scaleX = imageNaturalWidth / rect.width;
-                const scaleY = imageNaturalHeight / rect.height;
-                
-                const x = Math.round((event.clientX - rect.left) * scaleX);
-                const y = Math.round((event.clientY - rect.top) * scaleY);
-                
-                console.log(`Click: ${x}, ${y}`);
-                
-                try {
-                    const data = await request('/api/click', 'POST', { x, y });
-                    console.log(data.message);
-                    setTimeout(refreshScreenshot, 1000);
-                } catch (e) {
-                    console.error('Click error:', e);
-                }
-            }
-            
-            document.getElementById('screenshot').addEventListener('mousemove', (e) => {
-                const img = e.target;
-                const rect = img.getBoundingClientRect();
-                const scaleX = imageNaturalWidth / rect.width;
-                const scaleY = imageNaturalHeight / rect.height;
-                const x = Math.round((e.clientX - rect.left) * scaleX);
-                const y = Math.round((e.clientY - rect.top) * scaleY);
-                document.getElementById('coords').textContent = `X: ${x}, Y: ${y}`;
-            });
-            
-            async function updateStatus() {
-                try {
-                    const data = await request('/api/status');
-                    
-                    document.getElementById('browser-status').textContent = data.browser;
-                    document.getElementById('last-update').textContent = data.last_update || '-';
-                    document.getElementById('cookies-status').textContent = data.cookies;
-                    
-                    const statusElem = document.getElementById('status');
-                    if (data.browser === '✅ Відкритий') {
-                        statusElem.className = 'status online';
-                        statusElem.textContent = '🟢 Online';
-                    } else {
-                        statusElem.className = 'status offline';
-                        statusElem.textContent = '🔴 Offline';
-                    }
-                } catch (e) {
-                    console.error('Status update error:', e);
-                }
-            }
-            
-            function startAutoRefresh() {
-                autoRefresh = setInterval(() => {
-                    refreshScreenshot();
-                    updateStatus();
-                }, 3000);
-            }
-            
-            window.onload = async () => {
-                await updateStatus();
-                await refreshScreenshot();
-                startAutoRefresh();
-            };
-        </script>
-    </body>
-    </html>
-    """
-    return web.Response(text=html, content_type='text/html')
-
-async def handle_screenshot(request):
-    """API: Получити скріншот браузера"""
-    try:
-        if not checker.page:
-            return web.json_response({'error': 'Browser not initialized'}, status=400)
-        
-        screenshot = await checker.page.screenshot(type='png', full_page=True)
-        screenshot_base64 = base64.b64encode(screenshot).decode('utf-8')
-        
-        return web.json_response({
-            'screenshot': screenshot_base64,
-            'timestamp': datetime.now().isoformat()
-        })
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def handle_click(request):
-    """API: Передати клік в браузер"""
-    try:
-        if not checker.page:
-            return web.json_response({'error': 'Browser not initialized'}, status=400)
-        
-        data = await request.json()
-        x = data.get('x', 0)
-        y = data.get('y', 0)
-        
-        await checker.page.mouse.click(x, y)
-        print(f"Remote click: ({x}, {y})")
-        
-        return web.json_response({
-            'message': f'Clicked at ({x}, {y})',
-            'success': True
-        })
-    except Exception as e:
-        return web.json_response({'error': str(e)}, status=500)
-
-async def handle_init(request):
-    """API: Ініціалізувати браузер"""
-    try:
-        await checker.init_browser()
-        return web.json_response({
-            'message': 'Браузер ініціалізовано успішно!',
-            'success': True
-        })
-    except Exception as e:
-        return web.json_response({
-            'message': f'Помилка ініціалізації: {str(e)}',
-            'success': False
-        }, status=500)
-
-async def handle_check(request):
-    """API: Виконати перевірку"""
-    try:
-        result = await checker.make_screenshots()
-        return web.json_response({
-            'message': 'Перевірка виконана успішно!',
-            'success': True,
-            'update_date': result.get('update_date')
-        })
-    except Exception as e:
-        return web.json_response({
-            'message': f'Помилка перевірки: {str(e)}',
-            'success': False
-        }, status=500)
-
-async def handle_clear_cookies(request):
-    """API: Очистити куки"""
-    try:
-        if os.path.exists(checker.cookies_file):
-            os.remove(checker.cookies_file)
-        return web.json_response({
-            'message': 'Куки успішно видалено',
-            'success': True
-        })
-    except Exception as e:
-        return web.json_response({
-            'message': f'Помилка: {str(e)}',
-            'success': False
-        }, status=500)
-
-async def handle_logs(request):
-    """API: Отримати останні логи"""
-    return web.json_response({
-        'logs': list(log_buffer),
-        'timestamp': datetime.now().isoformat()
+@app.route('/')
+def index():
+    return jsonify({
+        'status': 'ok',
+        'bot_ready': bot_ready,
+        'timestamp': utcnow().isoformat()
     })
 
-async def handle_status(request):
-    """API: Получити статус бота"""
-    browser_status = "✅ Відкритий" if checker.browser else "✖️ Закритий"
-    cookies_status = "✅ Є" if os.path.exists(checker.cookies_file) else "✖️ Немає"
-    
-    return web.json_response({
-        'browser': browser_status,
-        'last_update': checker.last_update_date,
-        'cookies': cookies_status
+@app.route('/health')
+def health():
+    return jsonify({
+        'status': 'healthy' if bot_ready else 'starting',
+        'uptime': time.time()
     })
 
-async def start_web_server():
-    """Запуск веб-сервера з VNC інтерфейсом"""
-    app = web.Application()
-    
-    app.router.add_get('/', handle_root)
-    app.router.add_get('/health', handle_health)
-    
-    app.router.add_get('/api/screenshot', handle_screenshot)
-    app.router.add_post('/api/click', handle_click)
-    app.router.add_get('/api/init', handle_init)
-    app.router.add_get('/api/check', handle_check)
-    app.router.add_post('/api/clear-cookies', handle_clear_cookies)
-    app.router.add_get('/api/status', handle_status)
-    app.router.add_get('/api/logs', handle_logs)  # Новий endpoint для логів
-    
-    runner = web.AppRunner(app)
-    await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
-    log(f"✓ Web server started on port {PORT}")
+def run_flask():
+    app.run(host='0.0.0.0', port=PORT)
 
-class DTEKChecker:
-    def __init__(self):
-        self.browser = None
-        self.context = None
-        self.playwright = None
-        self.page = None
-        self.last_update_date = None
-        self.cookies_file = 'dtek_cookies.json'
+# === Helpers ===
+STEAM_URL_REGEX = re.compile(r'^(?:https?://)?steamcommunity\.com/(?:id|profiles)/([\w\-]+)/?$')
+
+def t(guild_id: int, key: str, **kwargs) -> str:
+    lang = server_langs.get(guild_id, 'en')
+    text = TEXTS.get(lang, TEXTS['en']).get(key, key)
+    return text.format(**kwargs) if kwargs else text
+
+async def init_db():
+    global db_pool
+    db_pool = await asyncpg.create_pool(DATABASE_URL, min_size=2, max_size=10)
     
-    def _get_random_user_agent(self):
-        user_agents = [
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/130.0.0.0 Safari/537.36',
-            'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/131.0.0.0 Safari/537.36',
-        ]
-        return random.choice(user_agents)
-    
-    async def _save_cookies(self):
-        try:
-            if self.context:
-                cookies = await self.context.cookies()
-                with open(self.cookies_file, 'w') as f:
-                    json.dump(cookies, f)
-                print("✓ Куки збережено")
-        except Exception as e:
-            print(f"⚠ Не вдалося зберегти куки: {e}")
-    
-    async def _load_cookies(self):
-        try:
-            if os.path.exists(self.cookies_file):
-                with open(self.cookies_file, 'r') as f:
-                    cookies = json.load(f)
-                await self.context.add_cookies(cookies)
-                print("✓ Куки завантажено")
-                return True
-        except Exception as e:
-            print(f"⚠ Не вдалося завантажити куки: {e}")
-        return False
-    
-    async def _random_delay(self, min_ms=100, max_ms=500):
-        await asyncio.sleep(random.uniform(min_ms/1000, max_ms/1000))
-    
-    async def _human_move_and_click(self, locator):
-        try:
-            box = await locator.bounding_box()
-            if box:
-                x = box['x'] + random.uniform(box['width'] * 0.3, box['width'] * 0.7)
-                y = box['y'] + random.uniform(box['height'] * 0.3, box['height'] * 0.7)
-                await self.page.mouse.move(x, y)
-                await self._random_delay(50, 150)
-            await locator.click()
-        except:
-            await locator.click()
-    
-    async def _human_type(self, locator, text):
-        await locator.click()
-        await self._random_delay(100, 300)
-        for char in text:
-            if random.random() < 0.1:
-                await self._random_delay(300, 800)
-            await locator.press_sequentially(char, delay=random.uniform(50, 200))
-    
-    async def _random_mouse_movements(self):
-        try:
-            for _ in range(random.randint(2, 5)):
-                x = random.randint(100, 1800)
-                y = random.randint(100, 1000)
-                await self.page.mouse.move(x, y)
-                await self._random_delay(100, 300)
-        except:
-            pass
-    
-    async def init_browser(self):
-        if not self.playwright:
-            self.playwright = await async_playwright().start()
-            
-            browser_args = [
-                '--no-sandbox',
-                '--disable-setuid-sandbox',
-                '--disable-blink-features=AutomationControlled',
-                '--disable-dev-shm-usage',
-                '--window-size=1920,1080',
-            ]
-            
-            try:
-                self.browser = await self.playwright.chromium.launch(
-                    headless=True,
-                    args=browser_args,
-                    channel='chrome'
-                )
-                log("✓ Chrome запущено")
-            except:
-                self.browser = await self.playwright.chromium.launch(
-                    headless=True,
-                    args=browser_args
-                )
-                log("✓ Chromium запущено")
-            
-            user_agent = self._get_random_user_agent()
-            
-            self.context = await self.browser.new_context(
-                viewport={'width': 1920, 'height': 1080},
-                locale='uk-UA',
-                timezone_id='Europe/Kiev',
-                user_agent=user_agent,
-                geolocation={'latitude': 50.4501, 'longitude': 30.5234},
+    async with db_pool.acquire() as conn:
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS profiles (
+                discord_id BIGINT PRIMARY KEY,
+                steam_url TEXT,
+                last_bound TIMESTAMP
             )
-            
-            await self.context.add_init_script("""
-                Object.defineProperty(navigator, 'webdriver', { get: () => undefined });
-                window.navigator.chrome = { runtime: {} };
-                Object.defineProperty(navigator, 'languages', { get: () => ['uk-UA', 'uk'] });
-            """)
-            
-            self.page = await self.context.new_page()
-            await self._load_cookies()
-            await self._setup_page()
-            await self._save_cookies()
-    
-    async def _close_survey_if_present(self):
-        """Закриває опрос якщо він з'явився - виправлена версія"""
-        try:
-            # 1. Шукаємо ВИДИМЕ модальне вікно опросу через JavaScript
-            modal_found = await self.page.evaluate("""
-                () => {
-                    const modals = document.querySelectorAll('[id^="modal-questionnaire-welcome-"]');
-                    for (const modal of modals) {
-                        const style = window.getComputedStyle(modal);
-                        if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
-                            return modal.id;
-                        }
-                    }
-                    return null;
-                }
-            """)
-            
-            if modal_found:
-                print(f"✓ Знайдено модальне вікно опросу: {modal_found}")
-                
-                # Шукаємо кнопку закриття ТІЛЬКИ всередині цього модального вікна
-                close_selector = f"#{modal_found} .modal__close"
-                try:
-                    close_btn = self.page.locator(close_selector).first
-                    if await close_btn.is_visible():
-                        await close_btn.click()
-                        await asyncio.sleep(1)
-                        print(f"✓ Опрос закрито через селектор: {close_selector}")
-                        return True
-                except:
-                    pass
-            
-            # 2. Альтернативний метод - шукаємо ВИДИМУ кнопку закриття опросу
-            try:
-                # Шукаємо кнопку з текстом закриття, яка ВИДИМА
-                close_by_text = self.page.locator('button:has-text("×")').first
-                if await close_by_text.is_visible(timeout=1000):
-                    await close_by_text.click()
-                    await asyncio.sleep(1)
-                    print("✓ Опрос закрито через символ ×")
-                    return True
-            except:
-                pass
-            
-            return False
-                    
-        except Exception as e:
-            # Не логуємо помилки якщо просто не знайшли опрос
-            return False
-
-    async def _wait_and_close_survey(self, timeout=3):
-        """Чекає появи опросу і закриває його"""
-        try:
-            for i in range(timeout):
-                if await self._close_survey_if_present():
-                    return True
-                await asyncio.sleep(1)
-            return False
-        except:
-            return False
-
-    async def _setup_page(self):
-        """Налаштування сторінки - стабільна версія"""
-        log("🔧 Налаштування сторінки...")
+        ''')
         
-        # Збільшений таймаут для повільних з'єднань
-        await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='domcontentloaded', timeout=90000)
-        
-        # Чекаємо повного завантаження
-        await asyncio.sleep(5)
-        
-        # Пробуємо закрити опрос одразу після завантаження
-        await self._close_survey_if_present()
-        await asyncio.sleep(1)
-        
-        # Перевіряємо капчу
-        try:
-            captcha_checkbox = self.page.locator('iframe[src*="checkbox"]')
-            captcha_count = await captcha_checkbox.count()
-            
-            if captcha_count > 0:
-                log("⚠️ Виявлено капчу! Використовуйте веб-інтерфейс для проходження.")
-                log("🌐 Клікніть по капчі в веб-інтерфейсі")
-                
-                # Чекаємо поки капча зникне (до 5 хвилин)
-                for i in range(300):
-                    await asyncio.sleep(1)
-                    current_count = await captcha_checkbox.count()
-                    if current_count == 0:
-                        log("✓ Капча пройдена!")
-                        await self._save_cookies()
-                        await asyncio.sleep(2)
-                        break
-                    
-                    # Кожні 30 секунд нагадуємо
-                    if i > 0 and i % 30 == 0:
-                        log(f"⏳ Очікування капчі... ({i} сек)")
-                
-                # Перевіряємо чи капча дійсно зникла
-                if await captcha_checkbox.count() > 0:
-                    log("❌ Капча не пройдена за 5 хвилин. Спробуйте знову.")
-                    
-        except Exception as e:
-            log(f"⚠ Помилка при перевірці капчі: {e}")
-        
-        await asyncio.sleep(2)
-        
-        # Закриваємо банер якщо є
-        try:
-            close_btn = self.page.locator('button.m-attention__close')
-            if await close_btn.count() > 0:
-                await self._human_move_and_click(close_btn)
-                await asyncio.sleep(1)
-        except:
-            pass
-        
-        # Заповнюємо форму
-        log("📝 Вводжу місто...")
-        city_input = self.page.locator('.discon-input-wrapper #city')
-        await city_input.wait_for(state='visible', timeout=15000)
-        await self._human_move_and_click(city_input)
-        await city_input.clear()
-        await asyncio.sleep(0.5)
-        await self._human_type(city_input, 'княж')
-        await asyncio.sleep(2)
-        
-        city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
-        await city_option.wait_for(state='visible', timeout=15000)
-        await self._human_move_and_click(city_option)
-        await asyncio.sleep(2)
-        
-        log("📝 Вводжу вулицю...")
-        street_input = self.page.locator('.discon-input-wrapper #street')
-        await street_input.wait_for(state='visible', timeout=15000)
-        await self._human_move_and_click(street_input)
-        await street_input.clear()
-        await asyncio.sleep(0.5)
-        await self._human_type(street_input, 'киЇ')
-        await asyncio.sleep(2)
-        
-        street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
-        await street_option.wait_for(state='visible', timeout=15000)
-        await self._human_move_and_click(street_option)
-        await asyncio.sleep(2)
-        
-        log("📝 Вводжу будинок...")
-        house_input = self.page.locator('input#house_num')
-        await house_input.wait_for(state='visible', timeout=15000)
-        await self._human_move_and_click(house_input)
-        await house_input.clear()
-        await asyncio.sleep(0.5)
-        await self._human_type(house_input, '168')
-        await asyncio.sleep(2)
-        
-        house_option = self.page.locator('#house_numautocomplete-list > div:first-child')
-        await house_option.wait_for(state='visible', timeout=15000)
-        await self._human_move_and_click(house_option)
-        await asyncio.sleep(3)
-        
-        # Пробуємо закрити опрос якщо з'явився після заповнення
-        await self._close_survey_if_present()
-        
-        # Отримуємо дату оновлення
-        try:
-            update_elem = self.page.locator('span.update')
-            await update_elem.wait_for(state='visible', timeout=15000)
-            self.last_update_date = await update_elem.text_content()
-            self.last_update_date = self.last_update_date.strip()
-            log(f"✓ Дата оновлення: {self.last_update_date}")
-        except Exception as e:
-            log(f"⚠ Не вдалося отримати дату: {e}")
-            self.last_update_date = "Невідомо"
-        
-        log("✅ Сторінка налаштована!")
-        await self._save_cookies()
-        log(f"⏰ Ініціалізація завершена")
-
-    async def check_for_update(self):
-        """Перевіряє чи змінилась дата - оновлена версія"""
-        try:
-            # Закриваємо опрос ПЕРЕД перевіркою
-            await self._close_survey_if_present()
-            
-            if random.random() < 0.3:
-                await self._random_mouse_movements()
-            
-            update_elem = self.page.locator('span.update')
-            await update_elem.wait_for(state='visible', timeout=10000)
-            current_date = await update_elem.text_content()
-            current_date = current_date.strip()
-            
-            print(f"Поточна дата: {current_date}, Остання: {self.last_update_date}")
-            
-            if current_date != self.last_update_date:
-                print("🔢 ОНОВЛЕННЯ ВИЯВЛЕНО!")
-                self.last_update_date = current_date
-                await self._save_cookies()
-                return True
-            return False
-        except Exception as e:
-            print(f"Помилка при перевірці: {e}")
-            return False
-
-    async def parse_schedule(self):
-        """
-        Парсить графік відключень з активної вкладки
-        """
-        try:
-            date_elem = self.page.locator('.date.active')
-            schedule_date = await date_elem.text_content()
-            schedule_date = schedule_date.strip() if schedule_date else "Невідомо"
-            
-            result = {
-                'date': schedule_date,
-                'hours': [],
-                'schedule': {}
-            }
-            
-            # Парсимо години (2-25)
-            for i in range(2, 26):
-                try:
-                    hour_selector = f'.active > table th:nth-child({i})'
-                    hour_elem = self.page.locator(hour_selector)
-                    hour_text = await hour_elem.text_content()
-                    hour_text = hour_text.strip()
-                    result['hours'].append(hour_text)
-                except:
-                    result['hours'].append(f"??:??")
-            
-            # Парсимо статуси (2-25)
-            for i in range(2, 26):
-                try:
-                    cell_selector = f'.active > table td:nth-child({i})'
-                    cell_elem = self.page.locator(cell_selector)
-                    cell_class = await cell_elem.get_attribute('class')
-                    cell_class = cell_class.strip() if cell_class else ""
-                    
-                    hour = result['hours'][i-2]
-                    
-                    # Визначаємо статус
-                    if 'cell-scheduled' in cell_class:
-                        status = 'scheduled'  # Відключення
-                    elif 'cell-non-scheduled' in cell_class:
-                        status = 'powered'  # Світло є
-                    elif 'cell-first-half' in cell_class:
-                        status = 'first-half'  # Перші 30 хв відключення
-                    elif 'cell-second-half' in cell_class:
-                        status = 'second-half'  # Другі 30 хв відключення
-                    else:
-                        status = 'powered'  # За замовчуванням - світло є
-                    
-                    result['schedule'][hour] = {
-                        'status': status,
-                        'class': cell_class
-                    }
-                    
-                except Exception as e:
-                    hour = result['hours'][i-2] if i-2 < len(result['hours']) else "??:??"
-                    result['schedule'][hour] = {
-                        'status': 'error',
-                        'class': ''
-                    }
-            
-            return result
-            
-        except Exception as e:
-            print(f"Помилка парсингу: {e}")
-            return None
-
-    def _calculate_schedule_hash(self, schedule):
-        """Розраховує хеш графіка для порівняння"""
-        if not schedule:
-            return None
-        
-        # Створюємо рядок з усіх статусів
-        status_string = ""
-        for hour in sorted(schedule['schedule'].keys()):
-            status_string += f"{hour}:{schedule['schedule'][hour]['status']};"
-        
-        # Хешуємо
-        return hashlib.md5(status_string.encode()).hexdigest()
-
-    def _has_any_outages(self, schedule):
-        """Перевіряє чи є хоч одне відключення в графіку"""
-        if not schedule or not schedule.get('schedule'):
-            return False
-        
-        for hour_data in schedule['schedule'].values():
-            status = hour_data.get('status')
-            if status in ['scheduled', 'first-half', 'second-half']:
-                return True
-        
-        return False
-
-    def _compare_schedules(self, old_schedule, new_schedule):
-        """
-        Порівнює два графіки і повертає текстовий опис змін
-        """
-        if not old_schedule or not new_schedule:
-            return "📊 Перша перевірка - немає з чим порівнювати"
-        
-        changes = []
-        added_outages = []  # Години де з'явилися відключення
-        removed_outages = []  # Години де відключення зникли
-        
-        # Порівнюємо кожну годину
-        for hour in new_schedule['schedule'].keys():
-            old_status = old_schedule['schedule'].get(hour, {}).get('status', 'unknown')
-            new_status = new_schedule['schedule'][hour]['status']
-            
-            # Перевіряємо зміни
-            if old_status in ['powered'] and new_status in ['scheduled', 'first-half', 'second-half']:
-                # Відключення додалось
-                added_outages.append(hour)
-            elif old_status in ['scheduled', 'first-half', 'second-half'] and new_status in ['powered']:
-                # Відключення прибралось
-                removed_outages.append(hour)
-        
-        # Формуємо текст
-        if not added_outages and not removed_outages:
-            return None  # Немає змін
-        
-        if added_outages:
-            changes.append(f"⚡ **Додалось відключення:** {', '.join(added_outages)}")
-        
-        if removed_outages:
-            changes.append(f"✅ **З'явилось світло:** {', '.join(removed_outages)}")
-        
-        return "\n".join(changes)
-
-    def crop_screenshot(self, screenshot_bytes, top_crop=300, bottom_crop=400, left_crop=0, right_crop=0):
-        """Обрізає скріншот"""
-        try:
-            image = Image.open(io.BytesIO(screenshot_bytes))
-            width, height = image.size
-            
-            left = left_crop
-            top = top_crop
-            right = width - right_crop
-            bottom = height - bottom_crop
-            
-            print(f"Обрізаю скріншот: {width}x{height} -> {right-left}x{bottom-top}")
-            
-            cropped = image.crop((left, top, right, bottom))
-            
-            output = io.BytesIO()
-            cropped.save(output, format='PNG', optimize=True, quality=95)
-            return output.getvalue()
-        except Exception as e:
-            print(f"⚠ Помилка при обрізці скріншота: {e}")
-            return screenshot_bytes
-
-    async def make_screenshots(self):
-        """Робить скріншоти з парсингом графіка - стабільна версія"""
-        try:
-            # Закриваємо опрос перед початком
-            await self._close_survey_if_present()
-            await asyncio.sleep(0.5)
-            
-            # СЬОГОДНІ
-            log("")
-            log("="*50)
-            log("📊 ПАРСИНГ ГРАФІКА НА СЬОГОДНІ")
-            log("="*50)
-            
-            schedule_today = await self.parse_schedule()
-            log("📸 Роблю скріншот основного графіка...")
-            screenshot_main = await self.page.screenshot(full_page=True, type='png')
-            screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
-            log("✓ Скріншот основного графіка готовий")
-            
-            # ЗАВТРА
-            log("")
-            log("="*50)
-            log("📊 ПАРСИНГ ГРАФІКА НА ЗАВТРА")
-            log("="*50)
-            
-            second_date = None
-            screenshot_tomorrow_cropped = None
-            schedule_tomorrow = None
-            
-            try:
-                date_selector = self.page.locator('div.date:nth-child(2)')
-                await date_selector.wait_for(state='visible', timeout=15000)
-                
-                second_date = await date_selector.text_content()
-                second_date = second_date.strip()
-                log(f"📅 Дата другого графіка: {second_date}")
-                
-                await date_selector.click()
-                log("✓ Клікнув на другий графік, чекаю завантаження...")
-                await asyncio.sleep(2)
-                
-                # Закриваємо опрос якщо з'явився
-                await self._close_survey_if_present()
-                
-                log("📸 Роблю скріншот другого графіка...")
-                schedule_tomorrow = await self.parse_schedule()
-                screenshot_tomorrow = await self.page.screenshot(full_page=True, type='png')
-                screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
-                log("✓ Скріншот другого графіка готовий")
-                
-                # Повертаємося назад
-                log("🔙 Повертаюся на перший графік...")
-                first_date = self.page.locator('div.date:nth-child(1)')
-                await first_date.wait_for(state='visible', timeout=10000)
-                await first_date.click()
-                await asyncio.sleep(2)
-                log(f"✓ Повернувся на перший графік")
-                
-            except asyncio.TimeoutError:
-                log(f"⚠ Таймаут при роботі зі другим графіком")
-            except Exception as e:
-                log(f"⚠ Не вдалося отримати другий графік: {e}")
-            
-            return {
-                'screenshot_main': screenshot_main_cropped,
-                'screenshot_tomorrow': screenshot_tomorrow_cropped,
-                'update_date': self.last_update_date,
-                'second_date': second_date,
-                'schedule_today': schedule_today,
-                'schedule_tomorrow': schedule_tomorrow,
-                'timestamp': datetime.now().isoformat()
-            }
-            
-        except Exception as e:
-            log(f"✖️ Помилка при створенні скріншотів: {e}")
-            raise
-
-    async def close_browser(self):
-        """Закриття браузера"""
-        if self.page:
-            await self.page.close()
-        if self.context:
-            await self.context.close()
-        if self.browser:
-            await self.browser.close()
-        if self.playwright:
-            await self.playwright.stop()
-
-checker = DTEKChecker()
-
-async def get_last_check():
-    """Отримує дані останньої перевірки з БД"""
-    try:
-        async with db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                'SELECT update_date, schedule_hash, schedule_data, created_at FROM dtek_checks ORDER BY created_at DESC LIMIT 1'
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS games (
+                discord_id BIGINT,
+                appid INTEGER,
+                game_name TEXT,
+                playtime INTEGER,
+                icon_hash TEXT,
+                PRIMARY KEY (discord_id, appid)
             )
-            if row:
-                return {
-                    'update_date': row['update_date'],
-                    'schedule_hash': row['schedule_hash'],
-                    'schedule_data': row['schedule_data'],
-                    'created_at': row['created_at']
-                }
-    except Exception as e:
-        print(f"Помилка при отриманні даних з БД: {e}")
+        ''')
+        
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS server_settings (
+                guild_id BIGINT PRIMARY KEY,
+                language TEXT DEFAULT 'en'
+            )
+        ''')
+        
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS sent_sales (
+                game_link TEXT PRIMARY KEY,
+                discount_end TIMESTAMP
+            )
+        ''')
+        
+        await conn.execute('''
+            CREATE TABLE IF NOT EXISTS sent_epic (
+                game_title TEXT PRIMARY KEY,
+                offer_end TIMESTAMP
+            )
+        ''')
+        
+        rows = await conn.fetch('SELECT guild_id, language FROM server_settings')
+        for row in rows:
+            server_langs[row['guild_id']] = row['language']
+    
+    print("✓ Database pool created and tables verified")
+
+async def resolve_steamid(identifier: str) -> str | None:
+    if identifier.isdigit():
+        return identifier
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            'https://api.steampowered.com/ISteamUser/ResolveVanityURL/v1/',
+            params={'key': STEAM_API_KEY, 'vanityurl': identifier}
+        ) as resp:
+            if resp.ok:
+                data = await resp.json()
+                return data.get('response', {}).get('steamid')
     return None
 
-async def save_check(update_date, schedule_hash, schedule_data):
-    """Зберігає дані перевірки в БД"""
-    try:
-        async with db_pool.acquire() as conn:
-            await conn.execute(
-                'INSERT INTO dtek_checks (update_date, schedule_hash, schedule_data, created_at) VALUES ($1, $2, $3, $4)',
-                update_date, schedule_hash, json.dumps(schedule_data), datetime.now()
-            )
-        print(f"✓ Дані збережено в БД")
-    except Exception as e:
-        print(f"✖️ Помилка при збереженні в БД: {e}")
+async def fetch_owned_games(steamid: str) -> dict:
+    now = utcnow()
+    if steamid in steam_cache and now - steam_cache[steamid][0] < CACHE_TTL:
+        return steam_cache[steamid][1]
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            'https://api.steampowered.com/IPlayerService/GetOwnedGames/v1/',
+            params={
+                'key': STEAM_API_KEY,
+                'steamid': steamid,
+                'include_appinfo': 'true',
+                'include_played_free_games': 'true'
+            }
+        ) as resp:
+            if resp.ok:
+                data = await resp.json()
+                games = data.get('response', {}).get('games', [])
+                result = {}
+                for g in games:
+                    appid = g['appid']
+                    name = g['name']
+                    hours = g['playtime_forever'] // 60
+                    icon_hash = g.get('img_icon_url', '')
+                    result[appid] = (name, hours, icon_hash)
+                steam_cache[steamid] = (now, result)
+                return result
+    return {}
 
-@bot.event
-async def on_ready():
-    log(f'✓ {bot.user} підключено до Discord!')
-    log(f'✓ Моніторинг каналу: {CHANNEL_ID}')
-    log(f'✓ Інтервал перевірки: кожні 5 хвилин')
-    log(f'🌐 Веб-інтерфейс запущено на порту {PORT}')
-    log(f'🥷 STEALTH MODE активовано')
-    
-    await init_db_pool()
-    await start_web_server()
-    
-    log("")
-    log("="*60)
-    log("💡 ВАЖЛИВО: Браузер ще не ініціалізовано!")
-    log(f"🌐 Відкрийте веб-інтерфейс: http://localhost:{PORT}")
-    log("🖱️  Натисніть кнопку 'Ініціалізувати браузер'")
-    log("="*60)
-    log("")
-    
-    log("🎉 Бот готовий до роботи!")
-    log(f"⏰ Поточний час: {datetime.now().strftime('%H:%M:%S')}")
-    
-    check_schedule.start()
-    log("✓ Автоматична перевірка запущена (кожні 5 хвилин)")
-    log("")
+def parse_steam_url(url: str) -> str | None:
+    m = STEAM_URL_REGEX.match(url)
+    return m.group(1) if m else None
 
-@tasks.loop(minutes=5)
-async def check_schedule():
-    """Періодична перевірка кожні 5 хвилин"""
-    channel = None
-    try:
-        log("")
-        log("="*50)
-        log(f"⏰ Час для автоматичної перевірки")
-        log("="*50)
-        
-        if not checker.browser or not checker.page:
-            log("⏸️ Браузер не ініціалізовано, пропускаю перевірку")
-            log("💡 Відкрийте веб-інтерфейс та натисніть 'Ініціалізувати браузер'")
-            log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
-            log("="*50)
-            log("")
-            return
-        
-        channel = bot.get_channel(CHANNEL_ID)
-        if not channel:
-            log(f"✖️ Канал {CHANNEL_ID} не знайдено!")
-            return
-        
-        log("🔍 Починаю перевірку оновлень...")
-        
-        has_update = await checker.check_for_update()
-        
-        if not has_update:
-            log(f"ℹ️ Без змін (дата не оновилась)")
-            log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
-            log("="*50)
-            log("")
-            return
-        
-        # Дата оновилась - робимо скріншоти і парсимо
-        log("📸 Дата оновилась! Роблю скріншоти...")
-        result = await asyncio.wait_for(checker.make_screenshots(), timeout=180)
-        
-        # Перевіряємо чи змінився графік
-        schedule_today = result.get('schedule_today')
-        current_hash = checker._calculate_schedule_hash(schedule_today)
-        
-        last_check = await get_last_check()
-        
-        # Порівнюємо графіки
-        changes_text = None
-        if last_check and last_check['schedule_hash'] == current_hash:
-            log("⏸️ Графік не змінився (тільки дата оновилась)")
-            log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
-            log("="*50)
-            log("")
-            return
-        elif last_check and last_check.get('schedule_data'):
-            # Є попередній графік - порівнюємо
-            old_schedule = last_check['schedule_data']
-            changes_text = checker._compare_schedules(old_schedule, schedule_today)
-        
-        # Графік змінився - відправляємо!
-        log("✅ Графік змінився - відправляю в Discord!")
-        
-        # Зберігаємо в БД
-        await save_check(result['update_date'], current_hash, schedule_today)
-        
-        # Відправляємо СЬОГОДНІ
-        embed = discord.Embed(
-            title="⚡ Графік відключень ДТЕК Київські регіональні електромережі",
-            description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
-            color=discord.Color.gold(),
-            timestamp=datetime.now()
-        )
-        
-        if result['update_date']:
-            embed.add_field(
-                name="📅 Дата оновлення на сайті",
-                value=f"`{result['update_date']}`",
-                inline=False
-            )
-        
-        # Додаємо опис змін якщо є
-        if changes_text:
-            embed.add_field(
-                name="📊 Що змінилось:",
-                value=changes_text,
-                inline=False
-            )
-        
-        embed.add_field(
-            name="✅ Статус",
-            value="**🔢 ГРАФІК ОНОВЛЕНО!**",
-            inline=False
-        )
-        embed.set_footer(text="Нова інформація • Автоматична перевірка")
-        
-        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-        file_main = discord.File(
-            io.BytesIO(result['screenshot_main']), 
-            filename=f"dtek_today_{timestamp_str}.png"
-        )
-        
-        await channel.send(embed=embed, file=file_main)
-        
-        # Перевіряємо ЗАВТРА
-        schedule_tomorrow = result.get('schedule_tomorrow')
-        if schedule_tomorrow and result.get('screenshot_tomorrow'):
-            # Перевіряємо чи є відключення
-            has_outages = checker._has_any_outages(schedule_tomorrow)
-            
-            if has_outages:
-                print("✅ Завтра є відключення - відправляю графік")
-                
-                embed_tomorrow = discord.Embed(
-                    title="📅 Графік відключень на завтра",
-                    description=f"**📍 Адреса:** с. Книжичі, вул. Київська, 168\n**📆 Дата:** {result['second_date'] or 'Завтра'}",
-                    color=discord.Color.blue(),
-                    timestamp=datetime.now()
-                )
-                
-                file_tomorrow = discord.File(
-                    io.BytesIO(result['screenshot_tomorrow']), 
-                    filename=f"dtek_tomorrow_{timestamp_str}.png"
-                )
-                
-                await channel.send(embed=embed_tomorrow, file=file_tomorrow)
-            else:
-                print("⏸️ Завтра немає відключень - не відправляю")
-        
-        log(f"✓ Повідомлення відправлено в Discord")
-        log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
-        log("="*50)
-        log("")
-        
-    except asyncio.TimeoutError:
-        log(f"⏱️ ТАЙМАУТ: Операція зайняла більше 3 хвилин")
-        log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
-        log("="*50)
-        log("")
-        if channel:
-            try:
-                error_embed = discord.Embed(
-                    title="⏱️ Таймаут операції",
-                    description="Перевірка зайняла більше 3 хвилин. Можливо, сайт повільно завантажується.",
-                    color=discord.Color.dark_gray(),
-                    timestamp=datetime.now()
-                )
-                await channel.send(embed=error_embed)
-            except:
-                pass
-    except Exception as e:
-        log(f"✖️ Помилка в check_schedule: {e}")
-        log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
-        
-        if channel:
-            try:
-                error_embed = discord.Embed(
-                    title="⚠️ Помилка перевірки",
-                    description=f"Не вдалося виконати перевірку.\n```{str(e)[:200]}```",
-                    color=discord.Color.dark_gray(),
-                    timestamp=datetime.now()
-                )
-                await channel.send(embed=error_embed)
-            except:
-                pass
+async def has_verified_role(member: discord.Member) -> bool:
+    return any(r.name.lower() == VERIFIED_ROLE.lower() for r in member.roles)
 
-@check_schedule.before_loop
-async def before_check_schedule():
-    """Чекаємо, поки бот буде готовий"""
-    await bot.wait_until_ready()
-    log("⏳ Очікування готовності бота завершено")
-    log("✓ Автоматичні перевірки почнуться через 5 хвилин")
-    log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
-
-@bot.command(name='check')
-async def manual_check(ctx):
-    """Ручна перевірка по команді !check"""
-    if not checker.browser or not checker.page:
-        await ctx.send("✖️ Браузер не ініціалізовано. Відкрийте веб-інтерфейс та натисніть 'Ініціалізувати браузер'")
-        return
-    
-    await ctx.send("⏳ Починаю перевірку графіка відключень...")
-    
-    try:
-        result = await asyncio.wait_for(checker.make_screenshots(), timeout=180)
-        
-        # Перевіряємо чи змінився графік
-        schedule_today = result.get('schedule_today')
-        current_hash = checker._calculate_schedule_hash(schedule_today)
-        
-        # Отримуємо попередній графік для порівняння
-        last_check = await get_last_check()
-        changes_text = None
-        if last_check and last_check.get('schedule_data'):
-            old_schedule = last_check['schedule_data']
-            changes_text = checker._compare_schedules(old_schedule, schedule_today)
-        
-        await save_check(result['update_date'], current_hash, schedule_today)
-        
-        # Відправляємо СЬОГОДНІ
-        embed = discord.Embed(
-            title="⚡ Графік відключень ДТЕК (Ручна перевірка)",
-            description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
-            color=discord.Color.green(),
-            timestamp=datetime.now()
-        )
-        
-        if result['update_date']:
-            embed.add_field(
-                name="📅 Дата оновлення на сайті",
-                value=f"`{result['update_date']}`",
-                inline=False
-            )
-        
-        # Додаємо опис змін якщо є
-        if changes_text:
-            embed.add_field(
-                name="📊 Що змінилось:",
-                value=changes_text,
-                inline=False
-            )
-        
-        embed.set_footer(text="Ручна перевірка • Запущено командою !check")
-        
-        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-        file_main = discord.File(
-            io.BytesIO(result['screenshot_main']), 
-            filename=f"dtek_manual_today_{timestamp_str}.png"
-        )
-        
-        await ctx.send(embed=embed, file=file_main)
-        
-        # Перевіряємо ЗАВТРА
-        schedule_tomorrow = result.get('schedule_tomorrow')
-        if schedule_tomorrow and result.get('screenshot_tomorrow'):
-            has_outages = checker._has_any_outages(schedule_tomorrow)
-            
-            if has_outages:
-                embed_tomorrow = discord.Embed(
-                    title="📅 Графік відключень на завтра",
-                    description=f"**📍 Адреса:** с. Книжичі, вул. Київська, 168\n**📆 Дата:** {result['second_date'] or 'Завтра'}",
-                    color=discord.Color.blue(),
-                    timestamp=datetime.now()
-                )
-                
-                file_tomorrow = discord.File(
-                    io.BytesIO(result['screenshot_tomorrow']), 
-                    filename=f"dtek_manual_tomorrow_{timestamp_str}.png"
-                )
-                
-                await ctx.send(embed=embed_tomorrow, file=file_tomorrow)
-        
-    except asyncio.TimeoutError:
-        error_embed = discord.Embed(
-            title="⏱️ Таймаут",
-            description="Перевірка зайняла більше 3 хвилин.",
-            color=discord.Color.dark_gray()
-        )
-        await ctx.send(embed=error_embed)
-    except Exception as e:
-        error_embed = discord.Embed(
-            title="✖️ Помилка",
-            description=f"```{str(e)[:500]}```",
-            color=discord.Color.dark_gray()
-        )
-        await ctx.send(embed=error_embed)
-
-@bot.command(name='info')
-async def bot_info(ctx):
-    """Інформація про бота"""
-    embed = discord.Embed(
-        title="ℹ️ Інформація про бота",
-        description="Бот для автоматичного моніторингу графіків відключень ДТЕК",
-        color=discord.Color.blue()
-    )
-    
-    embed.add_field(
-        name="📍 Адреса моніторингу",
-        value="с. Книжичі, вул. Київська, 168",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="⏱️ Інтервал перевірки",
-        value="Кожні 5 хвилин",
-        inline=True
-    )
-    
-    browser_status = "✅ Відкритий" if checker.browser else "✖️ Закритий"
-    embed.add_field(
-        name="🌐 Статус браузера",
-        value=browser_status,
-        inline=True
-    )
-    
-    cookies_status = "✅ Збережено" if os.path.exists(checker.cookies_file) else "✖️ Відсутні"
-    embed.add_field(
-        name="🍪 Куки",
-        value=cookies_status,
-        inline=True
-    )
-    
-    if checker.last_update_date:
-        embed.add_field(
-            name="📅 Остання дата на сайті",
-            value=f"`{checker.last_update_date}`",
-            inline=False
-        )
-    
-    embed.add_field(
-        name="🌐 Веб-інтерфейс",
-        value=f"Порт: {PORT}\nДля проходження капчі",
-        inline=False
-    )
-    
-    embed.add_field(
-        name="📋 Команди",
-        value="`!check` - Ручна перевірка\n`!info` - Інформація\n`!status` - Детальний статус\n`!stop` - Зупинити (адміни)",
-        inline=False
-    )
-    
-    await ctx.send(embed=embed)
-
-@bot.command(name='status')
-async def bot_status(ctx):
-    """Детальний статус бота"""
-    embed = discord.Embed(
-        title="📊 Детальний статус бота",
-        color=discord.Color.purple(),
-        timestamp=datetime.now()
-    )
-    
-    playwright_status = "✅ Запущено" if checker.playwright else "✖️ Не запущено"
-    browser_status = "✅ Відкрито" if checker.browser else "✖️ Закрито"
-    page_status = "✅ Завантажено" if checker.page else "✖️ Не завантажено"
-    
-    embed.add_field(name="Playwright", value=playwright_status, inline=True)
-    embed.add_field(name="Browser", value=browser_status, inline=True)
-    embed.add_field(name="Page", value=page_status, inline=True)
-    
-    db_status = "✅ Підключено" if db_pool else "✖️ Не підключено"
-    embed.add_field(name="База даних", value=db_status, inline=False)
-    
-    task_status = "✅ Запущено" if check_schedule.is_running() else "✖️ Зупинено"
-    embed.add_field(name="Автоматична перевірка", value=task_status, inline=False)
-    
-    if checker.last_update_date:
-        embed.add_field(name="📅 Дата на сайті", value=f"`{checker.last_update_date}`", inline=False)
-    
-    await ctx.send(embed=embed)
-
-@bot.command(name='stop')
-@commands.has_permissions(administrator=True)
-async def stop_bot(ctx):
-    """Остановка бота"""
-    await ctx.send("🛑 Зупиняю бота...")
-    check_schedule.cancel()
-    try:
-        await checker._save_cookies()
-        await checker.close_browser()
-    except:
-        pass
-    await close_db_pool()
-    await bot.close()
-
-if __name__ == '__main__':
-    try:
-        log("")
-        log("="*60)
-        log("🤖 ЗАПУСК DISCORD БОТА DTEK")
-        log("="*60)
-        log(f"📅 Дата і час запуску: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        log(f"🌐 Порт веб-інтерфейсу: {PORT}")
-        log(f"📢 Discord канал: {CHANNEL_ID}")
-        log(f"💾 База даних: {'✓ Налаштована' if DATABASE_URL else '✗ Не налаштована'}")
-        log("="*60)
-        log("")
-        
-        bot.run(DISCORD_TOKEN)
-    except KeyboardInterrupt:
-        log("")
-        log("🛑 Отримано сигнал зупинки...")
-    except Exception as e:
-        log("")
-        log(f"❌ КРИТИЧНА ПОМИЛКА: {e}")
-    finally:
-        log("")
-        log("🧹 Очищення ресурсів...")
+async def ensure_verified_role(guild: discord.Guild) -> discord.Role:
+    role = discord.utils.get(guild.roles, name=VERIFIED_ROLE)
+    if not role:
         try:
-            asyncio.run(checker._save_cookies())
-            asyncio.run(checker.close_browser())
-            asyncio.run(close_db_pool())
+            role = await guild.create_role(
+                name=VERIFIED_ROLE,
+                color=discord.Color.blue(),
+                reason="Auto-created by Steam Bot"
+            )
+            print(f"Created role '{VERIFIED_ROLE}' in guild {guild.name}")
+        except discord.Forbidden:
+            print(f"Missing permissions to create role in {guild.name}")
+    return role
+
+# === Database Functions ===
+async def get_profile(discord_id: int):
+    async with db_pool.acquire() as conn:
+        return await conn.fetchrow('SELECT * FROM profiles WHERE discord_id = $1', discord_id)
+
+async def save_profile(discord_id: int, steam_url: str):
+    async with db_pool.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO profiles (discord_id, steam_url, last_bound)
+            VALUES ($1, $2, NOW())
+            ON CONFLICT (discord_id) DO UPDATE SET steam_url = $2, last_bound = NOW()
+        ''', discord_id, steam_url)
+
+async def delete_profile(discord_id: int):
+    async with db_pool.acquire() as conn:
+        await conn.execute('DELETE FROM profiles WHERE discord_id = $1', discord_id)
+
+async def save_games(discord_id: int, games: dict):
+    async with db_pool.acquire() as conn:
+        await conn.execute('DELETE FROM games WHERE discord_id = $1', discord_id)
+        if games:
+            await conn.executemany('''
+                INSERT INTO games (discord_id, appid, game_name, playtime, icon_hash)
+                VALUES ($1, $2, $3, $4, $5)
+            ''', [(discord_id, appid, name, hrs, icon) for appid, (name, hrs, icon) in games.items()])
+
+async def get_all_games() -> dict:
+    async with db_pool.acquire() as conn:
+        rows = await conn.fetch('SELECT discord_id, appid, game_name, playtime, icon_hash FROM games')
+        data = {}
+        for row in rows:
+            uid = row['discord_id']
+            data.setdefault(uid, {})[row['appid']] = {
+                'name': row['game_name'], 
+                'hrs': row['playtime'],
+                'icon': row.get('icon_hash', '')
+            }
+        return data
+
+async def get_games_by_name(game_name: str):
+    async with db_pool.acquire() as conn:
+        return await conn.fetch(
+            'SELECT discord_id, playtime FROM games WHERE LOWER(game_name) = LOWER($1)',
+            game_name
+        )
+
+async def search_games_by_user(discord_id: int, query: str, limit: int = 25):
+    """Поиск игр пользователя по частичному совпадению"""
+    async with db_pool.acquire() as conn:
+        return await conn.fetch('''
+            SELECT appid, game_name, icon_hash 
+            FROM games 
+            WHERE discord_id = $1 AND LOWER(game_name) LIKE LOWER($2)
+            ORDER BY playtime DESC
+            LIMIT $3
+        ''', discord_id, f'%{query}%', limit)
+
+async def get_game_info_by_appid(appid: int):
+    """Получает информацию об игре по appid из базы данных"""
+    async with db_pool.acquire() as conn:
+        return await conn.fetchrow('''
+            SELECT game_name, icon_hash 
+            FROM games 
+            WHERE appid = $1 
+            LIMIT 1
+        ''', appid)
+
+def parse_lobby_link(lobby_link: str) -> dict | None:
+    """Парсит Steam lobby ссылку и извлекает appid, lobby_id, steam_id"""
+    pattern = r'steam://joinlobby/(\d+)/(\d+)/(\d+)'
+    match = re.match(pattern, lobby_link.strip())
+    
+    if match:
+        return {
+            'appid': int(match.group(1)),
+            'lobby_id': match.group(2),
+            'steam_id': match.group(3),
+            'full_link': lobby_link.strip()
+        }
+    return None
+
+async def get_lobby_from_profile(discord_id: int) -> dict | None:
+    """Получает активное лобби из профиля Steam пользователя"""
+    profile = await get_profile(discord_id)
+    if not profile:
+        return {'error': 'no_profile'}
+    
+    steam_url = profile['steam_url']
+    ident = parse_steam_url(steam_url)
+    if not ident:
+        return {'error': 'invalid_url'}
+    
+    steamid = await resolve_steamid(ident)
+    if not steamid:
+        return {'error': 'invalid_steamid'}
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.get(
+            'https://api.steampowered.com/ISteamUser/GetPlayerSummaries/v2/',
+            params={'key': STEAM_API_KEY, 'steamids': steamid}
+        ) as resp:
+            if not resp.ok:
+                return {'error': 'api_error'}
+            
+            data = await resp.json()
+            players = data.get('response', {}).get('players', [])
+            
+            if not players:
+                return {'error': 'player_not_found'}
+            
+            player = players[0]
+            
+            if player.get('communityvisibilitystate') != 3:
+                return {'error': 'profile_private'}
+            
+            if 'gameid' not in player:
+                return {'error': 'not_in_game'}
+            
+            appid = int(player['gameid'])
+            game_name = player.get('gameextrainfo', 'Unknown Game')
+        
+        try:
+            async with session.get(steam_url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.ok:
+                    html = await resp.text()
+                    
+                    lobby_pattern = r'steam://joinlobby/(\d+)/(\d+)/(\d+)'
+                    match = re.search(lobby_pattern, html)
+                    
+                    if match:
+                        lobby_appid = int(match.group(1))
+                        lobby_id = match.group(2)
+                        lobby_steamid = match.group(3)
+                        
+                        if lobby_appid == appid:
+                            return {
+                                'appid': appid,
+                                'lobby_id': lobby_id,
+                                'steam_id': lobby_steamid,
+                                'full_link': f'steam://joinlobby/{appid}/{lobby_id}/{lobby_steamid}',
+                                'game_name': game_name
+                            }
+        except Exception as e:
+            print(f"Error parsing profile for lobby: {e}")
+        
+        try:
+            async with session.get(
+                f'https://steamcommunity.com/profiles/{steamid}',
+                timeout=aiohttp.ClientTimeout(total=10)
+            ) as resp:
+                if resp.ok:
+                    html = await resp.text()
+                    
+                    js_pattern = r'g_rgProfileData\s*=\s*({[^;]+});'
+                    js_match = re.search(js_pattern, html)
+                    
+                    if js_match:
+                        try:
+                            import json
+                            profile_data = json.loads(js_match.group(1))
+                            
+                            if 'rich_presence' in profile_data:
+                                rp = profile_data['rich_presence']
+                                if 'steam_display' in rp and 'joinable' in rp.get('steam_display', '').lower():
+                                    return {
+                                        'appid': appid,
+                                        'lobby_id': '0',
+                                        'steam_id': steamid,
+                                        'full_link': f'steam://joinlobby/{appid}/0/{steamid}',
+                                        'game_name': game_name
+                                    }
+                        except:
+                            pass
+        except Exception as e:
+            print(f"Error getting rich presence: {e}")
+        
+        return {'error': 'game_no_lobby', 'game_name': game_name, 'appid': appid}
+
+async def set_server_lang(guild_id: int, lang: str):
+    server_langs[guild_id] = lang
+    async with db_pool.acquire() as conn:
+        await conn.execute('''
+            INSERT INTO server_settings (guild_id, language)
+            VALUES ($1, $2)
+            ON CONFLICT (guild_id) DO UPDATE SET language = $2
+        ''', guild_id, lang)
+
+# === Steam Discount API Functions ===
+async def get_featured_games() -> List[Dict]:
+    """Получает список featured игр через Steam API"""
+    url = 'https://store.steampowered.com/api/featured/'
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=30)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    return data.get('specials', {}).get('items', [])
+    except Exception as e:
+        print(f"Error fetching featured games: {e}")
+    
+    return []
+
+async def get_app_details(appid: int) -> Dict:
+    """Получает детальную информацию об игре"""
+    url = f'https://store.steampowered.com/api/appdetails?appids={appid}&cc=us&l=english'
+    
+    try:
+        async with aiohttp.ClientSession() as session:
+            async with session.get(url, timeout=aiohttp.ClientTimeout(total=10)) as resp:
+                if resp.status == 200:
+                    data = await resp.json()
+                    if str(appid) in data and data[str(appid)].get('success'):
+                        return data[str(appid)].get('data', {})
+    except Exception as e:
+        print(f"Error fetching app {appid} details: {e}")
+    
+    return {}
+
+async def check_free_promotions() -> List[Dict]:
+    """Проверяет игры со 100% скидкой (временно бесплатные)"""
+    featured = await get_featured_games()
+    free_games = []
+    
+    for game in featured:
+        appid = game.get('id')
+        if not appid:
+            continue
+        
+        discount_percent = game.get('discount_percent', 0)
+        
+        if discount_percent == 100:
+            details = await get_app_details(appid)
+            
+            if details:
+                is_free = details.get('is_free', False)
+                price_overview = details.get('price_overview', {})
+                
+                if not is_free and price_overview:
+                    final_price = price_overview.get('final', 0)
+                    initial_price = price_overview.get('initial', 0)
+                    
+                    if final_price == 0 and initial_price > 0:
+                        free_games.append({
+                            'appid': appid,
+                            'name': details.get('name', 'Unknown'),
+                            'original_price': initial_price / 100,
+                            'header_image': details.get('header_image', ''),
+                            'short_description': details.get('short_description', ''),
+                            'url': f"https://store.steampowered.com/app/{appid}"
+                        })
+                        
+                        print(f"Found 100% discount: {details.get('name')}")
+            
+            await asyncio.sleep(1.5)
+    
+    return free_games
+
+# === Views and UI Components ===
+class LanguageView(ui.View):
+    def __init__(self, guild_id: int):
+        super().__init__(timeout=600)
+        self.guild_id = guild_id
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        
+        try:
+            if hasattr(self, 'message') and self.message:
+                embed = discord.Embed(
+                    title="⏰ Timeout",
+                    description="Language selection expired. Use `/set_language` to change it later.",
+                    color=0x95a5a6
+                )
+                await self.message.edit(embed=embed, view=self)
         except:
             pass
-        log("✓ Бот зупинено")
-        log(f"📅 Час зупинки: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
-        log("")
+
+    @ui.button(label='🇬🇧 English', style=discord.ButtonStyle.secondary)
+    async def english(self, interaction: discord.Interaction, button: ui.Button):
+        await set_server_lang(self.guild_id, 'en')
+        await interaction.response.send_message(TEXTS['en']['lang_set'], ephemeral=True)
+        self.stop()
+
+    @ui.button(label='🇷🇺 Русский', style=discord.ButtonStyle.secondary)
+    async def russian(self, interaction: discord.Interaction, button: ui.Button):
+        await set_server_lang(self.guild_id, 'ru')
+        await interaction.response.send_message(TEXTS['ru']['lang_set'], ephemeral=True)
+        self.stop()
+
+    @ui.button(label='🇺🇦 Українська', style=discord.ButtonStyle.secondary)
+    async def ukrainian(self, interaction: discord.Interaction, button: ui.Button):
+        await set_server_lang(self.guild_id, 'ua')
+        await interaction.response.send_message(TEXTS['ua']['lang_set'], ephemeral=True)
+        self.stop()
+
+class ConfirmView(ui.View):
+    def __init__(self, user_id: int, steam_url: str, profile_name: str, discord_name: str, guild_id: int):
+        super().__init__(timeout=300)
+        self.user_id = user_id
+        self.steam_url = steam_url
+        self.profile_name = profile_name
+        self.discord_name = discord_name
+        self.guild_id = guild_id
+        
+        self.children[0].label = t(guild_id, 'yes')
+        self.children[1].label = t(guild_id, 'no')
+
+    async def on_timeout(self):
+        for item in self.children:
+            item.disabled = True
+        
+        try:
+            if hasattr(self, 'message') and self.message:
+                embed = discord.Embed(
+                    title="⏰ " + t(self.guild_id, 'timeout_expired'),
+                    description=t(self.guild_id, 'confirmation_expired') + ". Please use `/link_steam` again.",
+                    color=0x95a5a6
+                )
+                await self.message.edit(embed=embed, view=self)
+        except:
+            pass
+
+    @ui.button(label='Yes', style=discord.ButtonStyle.green)
+    async def confirm(self, interaction: discord.Interaction, button: ui.Button):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message(t(self.guild_id, 'not_your_request'), ephemeral=True)
+
+        await interaction.response.defer(ephemeral=True)
+        
+        await save_profile(self.user_id, self.steam_url)
+        
+        ident = parse_steam_url(self.steam_url)
+        steamid = await resolve_steamid(ident) if ident else None
+        games = await fetch_owned_games(steamid) if steamid else {}
+        await save_games(self.user_id, games)
+
+        role = await ensure_verified_role(interaction.guild)
+        member = interaction.guild.get_member(self.user_id)
+        if role and member:
+            try:
+                await member.add_roles(role)
+            except discord.Forbidden:
+                pass
+
+        success_embed = Embed(
+            title="✅ " + t(self.guild_id, 'profile_linked'),
+            description=(
+                f"**Steam Profile:** `{self.profile_name}`\n"
+                f"**Discord:** `{self.discord_name}`\n\n"
+                f"🎮 **Games synced:** `{len(games)}`\n"
+                f"🎖️ **Role assigned:** `{role.name if role else 'N/A'}`"
+            ),
+            color=0x00ff00
+        )
+        success_embed.add_field(
+            name=t(self.guild_id, 'next_steps'),
+            value=t(self.guild_id, 'next_steps_text'),
+            inline=False
+        )
+        success_embed.set_footer(text=t(self.guild_id, 'profile_linked'))
+        success_embed.timestamp = utcnow()
+        
+        await interaction.followup.send(embed=success_embed, ephemeral=True)
+        self.stop()
+
+    @ui.button(label='No', style=discord.ButtonStyle.red)
+    async def reject(self, interaction: discord.Interaction, button: ui.Button):
+        if interaction.user.id != self.user_id:
+            return await interaction.response.send_message(t(self.guild_id, 'not_your_request'), ephemeral=True)
+        await interaction.response.send_message(t(self.guild_id, 'link_cancelled'), ephemeral=True)
+        self.stop()
+
+class GamesView(ui.View):
+    def __init__(self, ctx_user: discord.Member, initial_users: List[discord.Member], guild_id: int):
+        super().__init__(timeout=900)
+        self.ctx_user = ctx_user
+        self.users = initial_users[:6]
+        self.pages: List[Embed] = []
+        self.page_idx = 0
+        self.message = None
+        self.guild_id = guild_id
+        self.show_hours = False
+        self.sort_mode = 'name'
+        self.creation_time = utcnow()
+        
+        self.update_buttons()
+
+    def _get_game_icon_url(self, appid: int, icon_hash: str = '') -> str:
+        if icon_hash:
+            return f"https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/{appid}/{icon_hash}.jpg"
+        return f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/capsule_sm_120.jpg"
+    
+    def _get_game_store_url(self, appid: int) -> str:
+        return f"https://store.steampowered.com/app/{appid}"
+
+    def update_buttons(self):
+        self.clear_items()
+        
+        prev_btn = ui.Button(
+            label="◀️",
+            style=discord.ButtonStyle.secondary,
+            disabled=(self.page_idx == 0 or len(self.pages) <= 1),
+            custom_id="prev"
+        )
+        prev_btn.callback = self.prev_page_callback
+        self.add_item(prev_btn)
+        
+        hours_btn = ui.Button(
+            label="⏱️ Hours" if not self.show_hours else "⏱️ Hide",
+            style=discord.ButtonStyle.primary if self.show_hours else discord.ButtonStyle.secondary,
+            custom_id="toggle_hours"
+        )
+        hours_btn.callback = self.toggle_hours_callback
+        self.add_item(hours_btn)
+        
+        sort_label = {
+            'name': '🔤 A-Z',
+            'total_hours': '📊 Total',
+            'your_hours': '⭐ Yours'
+        }
+        sort_btn = ui.Button(
+            label=sort_label[self.sort_mode],
+            style=discord.ButtonStyle.secondary,
+            custom_id="sort"
+        )
+        sort_btn.callback = self.cycle_sort_callback
+        self.add_item(sort_btn)
+        
+        next_btn = ui.Button(
+            label="▶️",
+            style=discord.ButtonStyle.secondary,
+            disabled=(self.page_idx >= len(self.pages) - 1 or len(self.pages) <= 1),
+            custom_id="next"
+        )
+        next_btn.callback = self.next_page_callback
+        self.add_item(next_btn)
+
+    async def prev_page_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx_user.id:
+            return await interaction.response.send_message(t(self.guild_id, 'not_your_request'), ephemeral=True)
+        
+        if self.page_idx > 0:
+            self.page_idx -= 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.pages[self.page_idx], view=self)
+
+    async def next_page_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx_user.id:
+            return await interaction.response.send_message(t(self.guild_id, 'not_your_request'), ephemeral=True)
+        
+        if self.page_idx < len(self.pages) - 1:
+            self.page_idx += 1
+            self.update_buttons()
+            await interaction.response.edit_message(embed=self.pages[self.page_idx], view=self)
+
+    async def toggle_hours_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx_user.id:
+            return await interaction.response.send_message(t(self.guild_id, 'not_your_request'), ephemeral=True)
+        
+        self.show_hours = not self.show_hours
+        self.update_buttons()
+        await self._build_pages()
+        await interaction.response.edit_message(embed=self.pages[self.page_idx], view=self)
+
+    async def cycle_sort_callback(self, interaction: discord.Interaction):
+        if interaction.user.id != self.ctx_user.id:
+            return await interaction.response.send_message(t(self.guild_id, 'not_your_request'), ephemeral=True)
+        
+        sort_cycle = ['name', 'total_hours', 'your_hours']
+        current_idx = sort_cycle.index(self.sort_mode)
+        self.sort_mode = sort_cycle[(current_idx + 1) % len(sort_cycle)]
+        
+        self.page_idx = 0
+        self.update_buttons()
+        await self._build_pages()
+        await interaction.response.edit_message(embed=self.pages[self.page_idx], view=self)
+
+    async def on_timeout(self):
+        """Удаляет сообщение после истечения 15 минут"""
+        try:
+            if self.message:
+                await self.message.delete()
+                
+                if self.message.id in PAGINATION_VIEWS:
+                    del PAGINATION_VIEWS[self.message.id]
+                    
+                print(f"✓ Deleted expired games view message {self.message.id}")
+        except discord.NotFound:
+            print(f"Message {self.message.id} already deleted")
+        except Exception as e:
+            print(f"Error deleting expired message: {e}")
+
+    async def _build_pages(self):
+        data = await get_all_games()
+        sets = [set(data.get(u.id, {})) for u in self.users]
+        common = set.intersection(*sets) if sets else set()
+        
+        if self.sort_mode == 'name':
+            sorted_list = sorted(common, key=lambda a: data[self.ctx_user.id][a]['name'].lower())
+        elif self.sort_mode == 'total_hours':
+            sorted_list = sorted(
+                common,
+                key=lambda a: sum(data[u.id].get(a, {}).get('hrs', 0) for u in self.users),
+                reverse=True
+            )
+        else:
+            sorted_list = sorted(
+                common,
+                key=lambda a: data[self.ctx_user.id].get(a, {}).get('hrs', 0),
+                reverse=True
+            )
+        
+        self.pages.clear()
+        per_page = 10
+        total = len(sorted_list)
+        
+        for i in range(0, max(total, 1), per_page):
+            chunk = sorted_list[i:i+per_page]
+            
+            if chunk:
+                game_lines = []
+                for idx, appid in enumerate(chunk, 1):
+                    game_data = data[self.ctx_user.id][appid]
+                    game_name = game_data['name']
+                    icon_hash = game_data.get('icon', '')
+                    game_url = self._get_game_store_url(appid)
+                    
+                    game_link = f"`{idx}.` [{game_name}]({game_url})"
+                    
+                    if self.show_hours:
+                        hours_info = []
+                        for u in self.users:
+                            hrs = data[u.id].get(appid, {}).get('hrs', 0)
+                            hours_info.append(f"**{u.display_name}**: {hrs}h")
+                        
+                        game_lines.append(f"{game_link}\n     └ {' • '.join(hours_info)}")
+                    else:
+                        game_lines.append(game_link)
+                
+                description = "\n".join(game_lines)
+                
+                emb = Embed(
+                    title=f"📚 {t(self.guild_id, 'common_games_title', count=total)}",
+                    description=description,
+                    color=0x171a21
+                )
+                
+                if chunk:
+                    first_game_data = data[self.ctx_user.id][chunk[0]]
+                    first_icon_hash = first_game_data.get('icon', '')
+                    if first_icon_hash:
+                        large_icon = f"https://cdn.cloudflare.steamstatic.com/steam/apps/{chunk[0]}/header.jpg"
+                        emb.set_thumbnail(url=large_icon)
+                
+                participants_text = " • ".join(f"**{u.display_name}**" for u in self.users)
+                emb.add_field(
+                    name=f"👥 {t(self.guild_id, 'participants')}",
+                    value=participants_text,
+                    inline=False
+                )
+                
+                if self.sort_mode == 'name':
+                    sort_text = t(self.guild_id, 'sort_alphabetical')
+                elif self.sort_mode == 'total_hours':
+                    sort_text = t(self.guild_id, 'sort_total_hours')
+                else:
+                    sort_text = t(self.guild_id, 'sort_your_hours', user=self.ctx_user.display_name)
+                
+                emb.add_field(
+                    name="📋 Sorting",
+                    value=sort_text,
+                    inline=True
+                )
+                
+                hours_status = t(self.guild_id, 'hours_visible') if self.show_hours else t(self.guild_id, 'hours_hidden')
+                emb.add_field(
+                    name="⏱️ Playtime",
+                    value=hours_status,
+                    inline=True
+                )
+                
+                page_num = len(self.pages) + 1
+                total_pages = max((total - 1) // per_page + 1, 1)
+                
+                elapsed = (utcnow() - self.creation_time).total_seconds()
+                remaining_minutes = max(0, int((900 - elapsed) / 60))
+                
+                emb.set_footer(
+                    text=f"{t(self.guild_id, 'page', current=page_num, total=total_pages)} • Expires in {remaining_minutes}min",
+                )
+                emb.timestamp = utcnow()
+                
+            else:
+                emb = Embed(
+                    title=f"📚 {t(self.guild_id, 'common_games_title', count=0)}",
+                    description=f"😢 {t(self.guild_id, 'no_common_games')}\n\n*Try linking more games or playing together!*",
+                    color=0x5c7e8b
+                )
+            
+            self.pages.append(emb)
+
+    async def render(self, interaction: discord.Interaction):
+        await self._build_pages()
+        
+        if not self.pages:
+            return await interaction.response.send_message(t(self.guild_id, 'no_common_games'), ephemeral=True)
+
+        self.update_buttons()
+        await interaction.response.send_message(embed=self.pages[0], view=self)
+        self.message = await interaction.original_response()
+        
+        PAGINATION_VIEWS[self.message.id] = self
+
+class LobbyJoinView(ui.View):
+    """View с кнопкой для присоединения к лобби через steam:// протокол"""
+    def __init__(self, lobby_link: str, guild_id: int, timeout: int = 900):
+        super().__init__(timeout=timeout)
+        self.lobby_link = lobby_link
+        self.guild_id = guild_id
+        
+        join_button = ui.Button(
+            label="🎮 Join Lobby",
+            style=discord.ButtonStyle.link,
+            url=lobby_link,
+            emoji="🎮"
+        )
+        self.add_item(join_button)
+        
+        copy_button = ui.Button(
+            label="📋 Copy Link",
+            style=discord.ButtonStyle.secondary,
+            custom_id="copy_lobby_link",
+            emoji="📋"
+        )
+        copy_button.callback = self.copy_link_callback
+        self.add_item(copy_button)
+        
+        help_button = ui.Button(
+            label="❓ Help",
+            style=discord.ButtonStyle.secondary,
+            custom_id="lobby_help",
+            emoji="❓"
+        )
+        help_button.callback = self.help_callback
+        self.add_item(help_button)
+        
+        self.message: discord.Message | None = None
+
+    async def copy_link_callback(self, interaction: discord.Interaction):
+        """Отправляет ссылку для копирования"""
+        await interaction.response.send_message(
+            f"**📋 Copy this link:**\n\n{self.lobby_link}\n\n"
+            f"**How to use:**\n"
+            f"• Desktop: Paste in browser or Win+R\n"
+            f"• Mobile: Long press and open with Steam app",
+            ephemeral=True
+        )
+
+    async def help_callback(self, interaction: discord.Interaction):
+        """Показывает подробную инструкцию"""
+        help_embed = Embed(
+            title="❓ How to Join Steam Lobby",
+            description="There are several ways to join the lobby:",
+            color=0x0099ff
+        )
+        
+        help_embed.add_field(
+            name="🖥️ Desktop (Recommended)",
+            value=(
+                "**Method 1:** Click 'Join Lobby' button\n"
+                "**Method 2:** Click 'Copy Link', then:\n"
+                "  • Press `Win+R` (Windows) or `Cmd+Space` (Mac)\n"
+                "  • Paste the link and press Enter\n"
+                "**Method 3:** Copy link and paste in browser address bar"
+            ),
+            inline=False
+        )
+        
+        help_embed.add_field(
+            name="📱 Mobile",
+            value=(
+                "1. Click 'Copy Link'\n"
+                "2. Long press the link\n"
+                "3. Select 'Open with Steam'\n"
+                "4. Steam app will open and join the lobby"
+            ),
+            inline=False
+        )
+        
+        help_embed.add_field(
+            name="⚠️ Troubleshooting",
+            value=(
+                "• Make sure Steam is running\n"
+                "• Check you own the game\n"
+                "• Verify your Steam profile is public\n"
+                "• Try copying the link manually"
+            ),
+            inline=False
+        )
+        
+        help_embed.set_footer(text="Steam Lobby Helper")
+        
+        await interaction.response.send_message(embed=help_embed, ephemeral=True)
+
+    async def on_timeout(self):
+        """Удаляет кнопки после истечения таймаута"""
+        for item in self.children:
+            item.disabled = True
+        
+        if hasattr(self, 'message') and self.message:
+            try:
+                await self.message.edit(view=self)
+            except discord.NotFound:
+                pass
+            except Exception as e:
+                print(f"Error updating lobby message on timeout: {e}")
+
+# === Game Autocomplete ===
+async def game_autocomplete(
+    interaction: discord.Interaction,
+    current: str,
+) -> List[app_commands.Choice[str]]:
+    """Автозаполнение для поиска игр"""
+    if not current:
+        return []
+    
+    games = await search_games_by_user(interaction.user.id, current, 25)
+    
+    return [
+        app_commands.Choice(name=game['game_name'][:100], value=game['game_name'])
+        for game in games
+    ]
+
+# === Command Handlers ===
+async def link_steam_handler(interaction: discord.Interaction, steam_url: str):
+    await interaction.response.defer(ephemeral=True)
+    gid = interaction.guild_id
+
+    profile = await get_profile(interaction.user.id)
+    
+    if profile and profile['steam_url'] == steam_url:
+        return await interaction.followup.send(t(gid, 'already_linked'), ephemeral=True)
+
+    if profile and profile['last_bound']:
+        if utcnow() - profile['last_bound'].replace(tzinfo=None) < timedelta(hours=BIND_TTL_HOURS):
+            return await interaction.followup.send(t(gid, 'cooldown', hours=BIND_TTL_HOURS), ephemeral=True)
+
+    if not STEAM_URL_REGEX.match(steam_url):
+        return await interaction.followup.send(t(gid, 'invalid_url'), ephemeral=True)
+
+    async with aiohttp.ClientSession() as session:
+        try:
+            async with session.get(steam_url, timeout=aiohttp.ClientTimeout(total=10)) as r:
+                if r.status != 200:
+                    return await interaction.followup.send(t(gid, 'profile_unavailable'), ephemeral=True)
+                html = await r.text()
+        except:
+            return await interaction.followup.send(t(gid, 'profile_unavailable'), ephemeral=True)
+
+    name_m = re.search(r'<title>Steam Community :: (.*?)</title>', html)
+    if not name_m:
+        name_m = re.search(r'<span class="actual_persona_name">(.*?)</span>', html)
+    if not name_m:
+        name_m = re.search(r'"personaname":"(.*?)"', html)
+    if not name_m:
+        name_m = re.search(r'<meta property="og:title" content="(.*?)"', html)
+    
+    profile_name = name_m.group(1) if name_m else interaction.user.display_name
+    profile_name = profile_name.replace('&quot;', '"').replace('&amp;', '&').replace('&lt;', '<').replace('&gt;', '>')
+    discord_name = interaction.user.display_name
+    
+    avatar_m = re.search(r'<link rel="image_src" href="(.*?)"', html)
+    avatar_url = avatar_m.group(1) if avatar_m else None
+    
+    ident = parse_steam_url(steam_url)
+    steamid = await resolve_steamid(ident) if ident else None
+    
+    game_count = 0
+    if steamid:
+        preview_games = await fetch_owned_games(steamid)
+        game_count = len(preview_games)
+    
+    embed = Embed(
+        title="🔗 " + t(gid, 'confirm_link', name=profile_name, discord_name=discord_name),
+        description=(
+            f"**Steam Profile:** `{profile_name}`\n"
+            f"**Discord User:** `{discord_name}`\n\n"
+            f"🎮 **Games found:** `{game_count}`\n\n"
+            f"*Confirm to link this profile to your Discord account*"
+        ),
+        color=0x1b2838
+    )
+    
+    if avatar_url:
+        embed.set_thumbnail(url=avatar_url)
+    
+    embed.add_field(
+        name=t(gid, 'privacy_note'),
+        value=t(gid, 'privacy_text'),
+        inline=False
+    )
+    
+    embed.set_footer(text=f"{t(gid, 'profile_info')}: {steam_url[:50]}...")
+    embed.timestamp = utcnow()
+    view = ConfirmView(interaction.user.id, steam_url, profile_name, discord_name, gid)
+    msg = await interaction.followup.send(embed=embed, view=view, ephemeral=True)
+    view.message = msg
+
+async def unlink_steam_handler(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    gid = interaction.guild_id
+    
+    profile = await get_profile(interaction.user.id)
+    if not profile:
+        embed = Embed(
+            title=t(gid, 'no_profile'),
+            description=t(gid, 'no_profile_text'),
+            color=0x95a5a6
+        )
+        return await interaction.followup.send(embed=embed, ephemeral=True)
+
+    steam_url = profile['steam_url']
+    await delete_profile(interaction.user.id)
+    
+    role = discord.utils.get(interaction.guild.roles, name=VERIFIED_ROLE)
+    if role:
+        try:
+            await interaction.user.remove_roles(role)
+        except:
+            pass
+    
+    unlink_embed = Embed(
+        title=t(gid, 'profile_unlinked_title'),
+        description=(
+            f"{t(gid, 'profile_unlinked_desc')}\n\n"
+            f"**{t(gid, 'previous_profile')}:** `{steam_url[:50]}...`\n"
+            f"{t(gid, 'games_removed')}: {t(gid, 'all_synced')}\n"
+            f"{t(gid, 'role_removed')}: `{VERIFIED_ROLE}`"
+        ),
+        color=0xe74c3c
+    )
+    unlink_embed.add_field(
+        name=t(gid, 'want_relink'),
+        value=t(gid, 'relink_text'),
+        inline=False
+    )
+    unlink_embed.set_footer(text="Steam Bot • Profile unlinked")
+    unlink_embed.timestamp = utcnow()
+    
+    await interaction.followup.send(embed=unlink_embed, ephemeral=True)
+
+async def find_teammates_handler(interaction: discord.Interaction, game: str):
+    gid = interaction.guild_id
+    
+    if not await has_verified_role(interaction.user):
+        return await interaction.response.send_message(t(gid, 'not_verified'), ephemeral=True)
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    rows = await get_games_by_name(game)
+    if not rows:
+        return await interaction.followup.send(t(gid, 'no_players'), ephemeral=True)
+    
+    async with db_pool.acquire() as conn:
+        game_info = await conn.fetchrow(
+            'SELECT appid, icon_hash FROM games WHERE LOWER(game_name) = LOWER($1) LIMIT 1',
+            game
+        )
+    
+    appid = game_info['appid'] if game_info else None
+    icon_hash = game_info['icon_hash'] if game_info else ''
+    
+    player_list = []
+    for idx, row in enumerate(sorted(rows, key=lambda x: x['playtime'], reverse=True), 1):
+        member = interaction.guild.get_member(row['discord_id'])
+        if member:
+            hrs = row['playtime']
+            if hrs > 500:
+                rank = "🏆"
+            elif hrs > 200:
+                rank = "💎"
+            elif hrs > 100:
+                rank = "⭐"
+            elif hrs > 50:
+                rank = "✨"
+            elif hrs > 10:
+                rank = "🎯"
+            else:
+                rank = "🆕"
+            
+            player_list.append(f"`#{idx}` {rank} {member.mention} **`{hrs}h`**")
+    
+    if appid:
+        game_url = f"https://store.steampowered.com/app/{appid}"
+        title = f"🔍 [**{game}**]({game_url})"
+    else:
+        title = f"🔍 **{game}**"
+    
+    embed = Embed(
+        title="Find Teammates",
+        description=f"{title}\n\n*{t(gid, 'found_players', count=len(player_list))}*\n\n" + "\n".join(player_list[:15]),
+        color=0x171a21
+    )
+    
+    if appid and icon_hash:
+        header_url = f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg"
+        embed.set_thumbnail(url=header_url)
+    
+    embed.add_field(
+        name=t(gid, 'ranks'),
+        value=t(gid, 'ranks_text'),
+        inline=False
+    )
+    
+    embed.set_footer(text=f"{t(gid, 'requested_by')} {interaction.user.display_name}", icon_url=interaction.user.display_avatar.url)
+    embed.timestamp = utcnow()
+    
+    if len(player_list) > 15:
+        embed.add_field(
+            name=t(gid, 'note'),
+            value=t(gid, 'showing_top', total=len(player_list)),
+            inline=False
+        )
+    
+    await interaction.followup.send(embed=embed, ephemeral=True)
+
+async def common_games_handler(interaction: discord.Interaction, user: discord.Member):
+    gid = interaction.guild_id
+    
+    if not await has_verified_role(interaction.user):
+        return await interaction.response.send_message(t(gid, 'not_verified'), ephemeral=True)
+    
+    view = GamesView(interaction.user, [interaction.user, user], gid)
+    await view.render(interaction)
+
+async def create_lobby_handler(interaction: discord.Interaction):
+    """Создает публичное объявление о лобби в канале (автоматически получает лобби)"""
+    gid = interaction.guild_id
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    status_msg = await interaction.followup.send(t(gid, 'checking_profile'), ephemeral=True)
+    
+    lobby_result = await get_lobby_from_profile(interaction.user.id)
+    
+    if not lobby_result or 'error' in lobby_result:
+        error_type = lobby_result.get('error', 'unknown') if lobby_result else 'no_profile'
+        
+        if error_type == 'no_profile':
+            return await status_msg.edit(content=t(gid, 'not_verified'))
+        elif error_type == 'profile_private':
+            return await status_msg.edit(content=t(gid, 'profile_private'))
+        elif error_type == 'not_in_game':
+            return await status_msg.edit(content=t(gid, 'not_in_game'))
+        elif error_type == 'game_no_lobby':
+            game_name = lobby_result.get('game_name', 'Unknown')
+            return await status_msg.edit(
+                content=t(gid, 'game_no_lobby').replace('{game}', game_name)
+            )
+        else:
+            return await status_msg.edit(content=t(gid, 'no_lobby_found'))
+    
+    appid = lobby_result['appid']
+    game_name = lobby_result.get('game_name', 'Unknown Game')
+    lobby_link = lobby_result['full_link']
+    
+    game_info = await get_game_info_by_appid(appid)
+    icon_hash = game_info['icon_hash'] if game_info else ''
+    
+    if game_info and game_info['game_name']:
+        game_name = game_info['game_name']
+    
+    embed = Embed(
+        title=t(gid, 'lobby_title'),
+        description=t(gid, 'lobby_description', creator=interaction.user.display_name, game=game_name),
+        color=0x00d4aa
+    )
+    
+    header_url = f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg"
+    embed.set_image(url=header_url)
+    
+    if icon_hash:
+        icon_url = f"https://cdn.cloudflare.steamstatic.com/steamcommunity/public/images/apps/{appid}/{icon_hash}.jpg"
+        embed.set_thumbnail(url=icon_url)
+    
+    embed.add_field(
+        name="🎮 Game Information",
+        value=f"**Game:** {game_name}\n**Host:** {interaction.user.mention}\n**Status:** Looking for teammates!",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🔗 How to Join",
+        value=(
+            "**1.** Click the 'Join Lobby' button below\n"
+            "**2.** Or click 'Copy Link' and paste it in your browser\n"
+            "**3.** Or press Win+R, paste the link, and hit Enter"
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="📎 Direct Link",
+        value=f"`{lobby_link}`",
+        inline=False
+    )
+    
+    embed.set_footer(
+        text=t(gid, 'lobby_by') + f" {interaction.user.display_name}", 
+        icon_url=interaction.user.display_avatar.url
+    )
+    embed.timestamp = utcnow()
+    
+    view = LobbyJoinView(lobby_link, gid)
+    
+    sent_message = await interaction.channel.send(embed=embed, view=view)
+    view.message = sent_message
+    
+    await status_msg.edit(content=t(gid, 'lobby_created'))
+
+async def invite_player_handler(interaction: discord.Interaction, user: discord.Member):
+    """Отправляет личное приглашение игроку (автоматически получает лобби из профиля)"""
+    gid = interaction.guild_id
+    
+    await interaction.response.defer(ephemeral=True)
+    
+    status_msg = await interaction.followup.send(t(gid, 'checking_profile'), ephemeral=True)
+    
+    lobby_result = await get_lobby_from_profile(interaction.user.id)
+    
+    if not lobby_result or 'error' in lobby_result:
+        error_type = lobby_result.get('error', 'unknown') if lobby_result else 'no_profile'
+        
+        if error_type == 'no_profile':
+            return await status_msg.edit(content=t(gid, 'not_verified'))
+        elif error_type == 'profile_private':
+            return await status_msg.edit(content=t(gid, 'profile_private'))
+        elif error_type == 'not_in_game':
+            return await status_msg.edit(content=t(gid, 'not_in_game'))
+        elif error_type == 'game_no_lobby':
+            game_name = lobby_result.get('game_name', 'Unknown')
+            return await status_msg.edit(
+                content=t(gid, 'game_no_lobby').replace('{game}', game_name)
+            )
+        else:
+            return await status_msg.edit(content=t(gid, 'no_lobby_found'))
+    
+    appid = lobby_result['appid']
+    game_name = lobby_result.get('game_name', 'Unknown Game')
+    lobby_link = lobby_result['full_link']
+    
+    game_info = await get_game_info_by_appid(appid)
+    icon_hash = game_info['icon_hash'] if game_info else ''
+    
+    if game_info and game_info['game_name']:
+        game_name = game_info['game_name']
+    
+    embed = Embed(
+        title=t(gid, 'invite_title'),
+        description=t(gid, 'invite_description', inviter=interaction.user.display_name, game=game_name),
+        color=0x1b2838
+    )
+    
+    header_url = f"https://cdn.cloudflare.steamstatic.com/steam/apps/{appid}/header.jpg"
+    embed.set_thumbnail(url=header_url)
+    
+    embed.add_field(
+        name="📋 Lobby Information",
+        value=f"**Game:** {game_name}\n**Host:** {interaction.user.mention}",
+        inline=False
+    )
+    
+    embed.add_field(
+        name="🔗 How to Join",
+        value=(
+            "**Option 1:** Click the button below\n"
+            "**Option 2:** Copy the link and paste it in your browser\n"
+            "**Option 3:** Press Win+R, paste the link, and press Enter"
+        ),
+        inline=False
+    )
+    
+    embed.add_field(
+        name="📎 Direct Link",
+        value=f"`{lobby_link}`",
+        inline=False
+    )
+    
+    embed.set_footer(
+        text=t(gid, 'invitation_from') + f" {interaction.user.display_name}", 
+        icon_url=interaction.user.display_avatar.url
+    )
+    embed.timestamp = utcnow()
+    
+    view = LobbyJoinView(lobby_link, gid)
+    
+    try:
+        sent_message = await user.send(embed=embed, view=view)
+        view.message = sent_message
+        await status_msg.edit(content=t(gid, 'invite_sent', user=user.mention))
+    except discord.Forbidden:
+        await status_msg.edit(
+            content=f"❌ Could not send invitation to {user.mention}. They may have DMs disabled."
+        )
+
+# === Command Registration ===
+async def register_commands_for_guild(guild: discord.Guild, lang: str):
+    @app_commands.command(name=t(guild.id, 'cmd_link_steam'), description=t(guild.id, 'cmd_link_desc'))
+    @app_commands.describe(steam_url=t(guild.id, 'cmd_link_param'))
+    async def link_steam_cmd(interaction: discord.Interaction, steam_url: str):
+        await link_steam_handler(interaction, steam_url)
+    
+    @app_commands.command(name=t(guild.id, 'cmd_unlink_steam'), description=t(guild.id, 'cmd_unlink_desc'))
+    async def unlink_steam_cmd(interaction: discord.Interaction):
+        await unlink_steam_handler(interaction)
+    
+    @app_commands.command(name=t(guild.id, 'cmd_find_teammates'), description=t(guild.id, 'cmd_find_desc'))
+    @app_commands.describe(game=t(guild.id, 'cmd_find_param'))
+    @app_commands.autocomplete(game=game_autocomplete)
+    async def find_teammates_cmd(interaction: discord.Interaction, game: str):
+        await find_teammates_handler(interaction, game)
+    
+    @app_commands.command(name=t(guild.id, 'cmd_common_games'), description=t(guild.id, 'cmd_common_desc'))
+    @app_commands.describe(user=t(guild.id, 'cmd_common_param'))
+    async def common_games_cmd(interaction: discord.Interaction, user: discord.Member):
+        await common_games_handler(interaction, user)
+    
+    @app_commands.command(name=t(guild.id, 'cmd_invite_player'), description=t(guild.id, 'cmd_invite_desc'))
+    @app_commands.describe(user=t(guild.id, 'cmd_invite_param_user'))
+    async def invite_player_cmd(interaction: discord.Interaction, user: discord.Member):
+        await invite_player_handler(interaction, user)
+    
+    @app_commands.command(name=t(guild.id, 'cmd_create_lobby'), description=t(guild.id, 'cmd_create_lobby_desc'))
+    async def create_lobby_cmd(interaction: discord.Interaction):
+        await create_lobby_handler(interaction)
+    
+    bot.tree.add_command(link_steam_cmd, guild=guild)
+    bot.tree.add_command(unlink_steam_cmd, guild=guild)
+    bot.tree.add_command(find_teammates_cmd, guild=guild)
+    bot.tree.add_command(common_games_cmd, guild=guild)
+    bot.tree.add_command(invite_player_cmd, guild=guild)
+    bot.tree.add_command(create_lobby_cmd, guild=guild)
+    
+    await bot.tree.sync(guild=guild)
+
+# === Global Slash Commands (Register BEFORE on_ready) ===
+@bot.tree.command(name='set_language', description='Set server language (Admin only)')
+@app_commands.describe(language='Language / Язык')
+@app_commands.choices(language=[
+    app_commands.Choice(name='🇬🇧 English', value='en'),
+    app_commands.Choice(name='🇷🇺 Русский', value='ru'),
+    app_commands.Choice(name='🇺🇦 Українська', value='ua'),
+])
+@app_commands.default_permissions(administrator=True)
+async def set_language(interaction: discord.Interaction, language: str):
+    await set_server_lang(interaction.guild_id, language)
+    await interaction.response.send_message(TEXTS[language]['lang_set'], ephemeral=True)
+    
+    bot.tree.clear_commands(guild=interaction.guild)
+    await register_commands_for_guild(interaction.guild, language)
+    await interaction.followup.send("✅ Commands updated to new language!", ephemeral=True)
+
+@bot.tree.command(name='check_discounts', description='Manually check for 100% discounts (Admin only)')
+@app_commands.default_permissions(administrator=True)
+async def check_discounts_command(interaction: discord.Interaction):
+    await interaction.response.defer(ephemeral=True)
+    
+    try:
+        free_games = await check_free_promotions()
+        
+        if not free_games:
+            await interaction.followup.send(
+                "✅ Check complete - no new 100% discount games found.",
+                ephemeral=True
+            )
+            return
+        
+        games_list = "\n".join([
+            f"• **{g['name']}** (${g['original_price']:.2f})"
+            for g in free_games
+        ])
+        
+        await interaction.followup.send(
+            f"🎉 Found {len(free_games)} game(s) with 100% discount:\n\n{games_list}\n\n"
+            f"Alerts will be sent to the configured channel.",
+            ephemeral=True
+        )
+        
+        if DISCOUNT_CHANNEL_ID > 0:
+            await discount_game_check()
+        
+    except Exception as e:
+        await interaction.followup.send(
+            f"❌ Error checking discounts: {str(e)}",
+            ephemeral=True
+        )
+
+# === Events ===
+@bot.event
+async def on_ready():
+    global bot_ready
+    print(f'Bot logged in as {bot.user}')
+    
+    try:
+        await init_db()
+        print("✓ Database initialized")
+    except Exception as e:
+        print(f"✗ Database init error: {e}")
+        return
+    
+    print("Starting command sync...")
+    try:
+        # Синхронизируем глобальные команды
+        print("Syncing global commands...")
+        await bot.tree.sync()
+        print("✓ Global commands synced")
+        
+        # Регистрируем команды для каждого сервера
+        for guild in bot.guilds:
+            lang = server_langs.get(guild.id, 'en')
+            await register_commands_for_guild(guild, lang)
+        
+        print(f"✓ Commands synced for {len(bot.guilds)} guilds")
+    except Exception as e:
+        print(f"✗ Command sync error: {e}")
+    
+    print("Starting background tasks...")
+    
+    tasks_to_start = [
+        ('daily_link_check', daily_link_check),
+        ('discount_game_check', discount_game_check),
+        ('cleanup_old_views', cleanup_old_views),
+        ('epic_free_check', epic_free_check)
+    ]
+    
+    for task_name, task in tasks_to_start:
+        try:
+            if not task.is_running():
+                task.start()
+                print(f"✓ {task_name} started")
+        except Exception as e:
+            print(f"✗ Error starting {task_name}: {e}")
+    
+    print(f"✓ Bot ready! Serving {len(bot.guilds)} guilds")
+    bot_ready = True
+
+@bot.event
+async def on_guild_join(guild: discord.Guild):
+    try:
+        embed = Embed(
+            title="🎮 Steam Bot",
+            description="Thanks for adding me! Please choose the server language:\n\n"
+                        "Спасибо за добавление! Выберите язык сервера:\n\n"
+                        "Дякуємо за додавання! Оберіть мову сервера:",
+            color=0x1a9fff
+        )
+        view = LanguageView(guild.id)
+        msg = await guild.owner.send(embed=embed, view=view)
+        view.message = msg
+    except discord.Forbidden:
+        pass
+
+# === Background Tasks ===
+@tasks.loop(time=dtime(0, 10))
+async def daily_link_check():
+    """Ежедневная синхронизация Steam библиотек"""
+    async with db_pool.acquire() as conn:
+        profiles = await conn.fetch('SELECT discord_id, steam_url FROM profiles')
+    
+    for p in profiles:
+        ident = parse_steam_url(p['steam_url'])
+        if not ident:
+            continue
+        steamid = await resolve_steamid(ident)
+        if steamid:
+            games = await fetch_owned_games(steamid)
+            await save_games(p['discord_id'], games)
+        await asyncio.sleep(1)
+
+@tasks.loop(hours=6)
+async def discount_game_check():
+    """Проверяет Steam на игры со 100% скидкой"""
+    ch = bot.get_channel(DISCOUNT_CHANNEL_ID)
+    if not ch:
+        print("Discord channel not configured for discount alerts")
+        return
+    
+    print("Starting Steam 100% discount check...")
+    
+    try:
+        free_games = await check_free_promotions()
+        
+        if not free_games:
+            print("No 100% discount games found")
+            return
+        
+        async with db_pool.acquire() as conn:
+            existing = {
+                r['game_link'] 
+                for r in await conn.fetch('SELECT game_link FROM sent_sales')
+            }
+            
+            sent_count = 0
+            
+            for game in free_games:
+                game_url = game['url']
+                
+                if game_url in existing:
+                    continue
+                
+                await conn.execute('''
+                    INSERT INTO sent_sales (game_link, discount_end) 
+                    VALUES ($1, NOW() + interval '14 days') 
+                    ON CONFLICT DO NOTHING
+                ''', game_url)
+                
+                embed = Embed(
+                    title="🎉 FREE TO KEEP - 100% OFF!",
+                    description=(
+                        f"**[{game['name']}]({game_url})**\n\n"
+                        f"💵 Regular Price: **${game['original_price']:.2f}**\n"
+                        f"✨ Now: **FREE**\n\n"
+                        f"{game['short_description'][:200]}...\n\n"
+                        f"⏰ **Limited Time Offer - Claim it now!**"
+                    ),
+                    color=0x00ff00
+                )
+                
+                if game['header_image']:
+                    embed.set_image(url=game['header_image'])
+                
+                embed.set_footer(
+                    text="Steam 100% Discount Alert • Claim before it ends!"
+                )
+                embed.timestamp = utcnow()
+                
+                try:
+                    await ch.send(embed=embed)
+                    sent_count += 1
+                    print(f"✓ Sent alert for: {game['name']}")
+                    
+                    await asyncio.sleep(2)
+                    
+                except Exception as e:
+                    print(f"Error sending message for {game['name']}: {e}")
+            
+            if sent_count > 0:
+                print(f"✓ Sent {sent_count} new 100% discount alerts")
+            
+    except Exception as e:
+        print(f"Error in discount_game_check: {e}")
+        import traceback
+        traceback.print_exc()
+
+@tasks.loop(hours=1)
+async def cleanup_old_views():
+    """Очищает устаревшие views из кэша"""
+    current_time = utcnow()
+    to_remove = []
+    
+    for msg_id, view in PAGINATION_VIEWS.items():
+        if hasattr(view, 'message') and view.message:
+            try:
+                if not view.is_finished():
+                    continue
+                to_remove.append(msg_id)
+            except:
+                to_remove.append(msg_id)
+    
+    for msg_id in to_remove:
+        PAGINATION_VIEWS.pop(msg_id, None)
+    
+    if to_remove:
+        print(f"Cleaned up {len(to_remove)} old pagination views")
+
+@tasks.loop(hours=6)
+async def epic_free_check():
+    """Проверяет бесплатные игры в Epic Games Store"""
+    ch = bot.get_channel(EPIC_CHANNEL_ID)
+    if not ch:
+        return
+    
+    async with aiohttp.ClientSession() as session:
+        async with session.get(EPIC_API_URL) as resp:
+            if not resp.ok:
+                return
+            data = await resp.json()
+    
+    offers = data.get('data', {}).get('Catalog', {}).get('searchStore', {}).get('elements', [])
+    
+    async with db_pool.acquire() as conn:
+        existing = {r['game_title'] for r in await conn.fetch('SELECT game_title FROM sent_epic')}
+        
+        for game in offers:
+            title = game.get('title')
+            if not title or title in existing:
+                continue
+            
+            promos = game.get('promotions') or {}
+            for block in promos.get('promotionalOffers', []):
+                for o in block.get('promotionalOffers', []):
+                    if o.get('discountSetting', {}).get('discountPercentage') == 0:
+                        await conn.execute(
+                            'INSERT INTO sent_epic (game_title, offer_end) VALUES ($1, $2) ON CONFLICT DO NOTHING',
+                            title, utcnow() + timedelta(days=7)
+                        )
+                        slug = game.get('productSlug') or game.get('catalogNs', {}).get('mappings', [{}])[0].get('pageSlug')
+                        url = f"https://www.epicgames.com/store/p/{slug}" if slug else ""
+                        
+                        embed = Embed(
+                            title="🎁 FREE GAME",
+                            description=f"**[{title}]({url})**\n\nFree on Epic Games Store!",
+                            color=0x00d4aa
+                        )
+                        embed.set_footer(text="Epic Games")
+                        await ch.send(embed=embed)
+
+# === Start ===
+if __name__ == '__main__':
+    Thread(target=run_flask, daemon=True).start()
+    bot.run(DISCORD_TOKEN)
+    
