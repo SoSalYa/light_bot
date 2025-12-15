@@ -555,7 +555,7 @@ async def handle_status(request):
         'cookies': cookies_status
     })
 
-async def start_web_server():
+sync def start_web_server():
     """Запуск веб-сервера з VNC інтерфейсом"""
     app = web.Application()
     
