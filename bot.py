@@ -3,7 +3,7 @@ from discord.ext import commands, tasks
 import asyncio
 from playwright.async_api import async_playwright
 import os
-from datetime import datetime
+from datetime import datetime, timedelta
 import io
 import asyncpg
 from PIL import Image
@@ -12,6 +12,8 @@ import random
 import json
 import base64
 import hashlib
+import sys
+from collections import deque
 
 # Конфігурація
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
@@ -21,6 +23,17 @@ PORT = int(os.getenv('PORT', 10000))
 
 # Database pool
 db_pool = None
+
+# Логування в пам'яті для веб-інтерфейсу
+log_buffer = deque(maxlen=500)  # Зберігаємо останні 500 логів
+
+def log(message):
+    """Логування з виводом в консоль і збереженням для веб-інтерфейсу"""
+    timestamp = datetime.now().strftime('%H:%M:%S')
+    log_entry = f"[{timestamp}] {message}"
+    print(log_entry)
+    log_buffer.append(log_entry)
+    sys.stdout.flush()
 
 # Створення бота
 intents = discord.Intents.default()
@@ -37,7 +50,7 @@ async def init_db_pool():
             max_size=10,
             command_timeout=60
         )
-        print("✓ Database pool створено")
+        log("✓ Database pool створено")
         
         # Створюємо таблицю якщо не існує
         async with db_pool.acquire() as conn:
@@ -50,14 +63,14 @@ async def init_db_pool():
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
-        print("✓ Таблиця БД готова")
+        log("✓ Таблиця БД готова")
 
 async def close_db_pool():
     """Закриття connection pool"""
     global db_pool
     if db_pool:
         await db_pool.close()
-        print("✓ Database pool закрито")
+        log("✓ Database pool закрито")
 
 # HTTP сервер для Render health checks + VNC interface
 async def handle_health(request):
@@ -65,6 +78,516 @@ async def handle_health(request):
     return web.Response(text="OK", status=200)
 
 async def handle_root(request):
+    """Root endpoint - VNC interface"""
+    html = """
+    <!DOCTYPE html>
+    <html>
+    <head>
+        <meta charset="UTF-8">
+        <meta name="viewport" content="width=device-width, initial-scale=1.0">
+        <title>DTEK Bot Remote Control</title>
+        <style>
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            body {
+                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                min-height: 100vh;
+                padding: 20px;
+            }
+            .container {
+                max-width: 1800px;
+                margin: 0 auto;
+                display: grid;
+                grid-template-columns: 1fr 400px;
+                gap: 20px;
+            }
+            
+            .left-panel {
+                display: flex;
+                flex-direction: column;
+                gap: 20px;
+            }
+            
+            .right-panel {
+                display: flex;
+                flex-direction: column;
+                gap: 20px;
+                position: sticky;
+                top: 20px;
+                height: fit-content;
+            }
+            
+            .header {
+                text-align: center;
+                color: white;
+                margin-bottom: 30px;
+                grid-column: 1 / -1;
+            }
+            .header h1 {
+                font-size: 2.5em;
+                margin-bottom: 10px;
+                text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
+            }
+            .status {
+                display: inline-block;
+                padding: 8px 20px;
+                background: rgba(255,255,255,0.2);
+                border-radius: 20px;
+                font-size: 14px;
+                backdrop-filter: blur(10px);
+            }
+            .status.online { background: rgba(76, 175, 80, 0.3); }
+            .status.offline { background: rgba(244, 67, 54, 0.3); }
+            
+            .control-panel, .viewer, .info-panel, .instructions, .logs-panel {
+                background: white;
+                border-radius: 15px;
+                padding: 20px;
+                box-shadow: 0 10px 40px rgba(0,0,0,0.2);
+            }
+            
+            .control-panel h2, .viewer h2, .info-panel h2, .instructions h3, .logs-panel h2 {
+                margin-bottom: 15px;
+                color: #333;
+            }
+            
+            .buttons {
+                display: flex;
+                gap: 10px;
+                flex-wrap: wrap;
+            }
+            button {
+                padding: 12px 24px;
+                border: none;
+                border-radius: 8px;
+                cursor: pointer;
+                font-size: 14px;
+                font-weight: 600;
+                transition: all 0.3s;
+                box-shadow: 0 4px 6px rgba(0,0,0,0.1);
+            }
+            button:hover {
+                transform: translateY(-2px);
+                box-shadow: 0 6px 12px rgba(0,0,0,0.15);
+            }
+            button:active {
+                transform: translateY(0);
+            }
+            .btn-primary {
+                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
+                color: white;
+            }
+            .btn-success {
+                background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);
+                color: white;
+            }
+            .btn-danger {
+                background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
+                color: white;
+            }
+            .btn-info {
+                background: linear-gradient(135deg, #3a7bd5 0%, #00d2ff 100%);
+                color: white;
+            }
+            
+            .screenshot-container {
+                position: relative;
+                width: 100%;
+                background: #f0f0f0;
+                border-radius: 10px;
+                overflow: hidden;
+                min-height: 600px;
+                display: flex;
+                align-items: center;
+                justify-content: center;
+            }
+            #screenshot {
+                width: 100%;
+                height: auto;
+                display: block;
+                cursor: crosshair;
+            }
+            .loading {
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                text-align: center;
+                color: #999;
+            }
+            .spinner {
+                border: 4px solid #f3f3f3;
+                border-top: 4px solid #667eea;
+                border-radius: 50%;
+                width: 50px;
+                height: 50px;
+                animation: spin 1s linear infinite;
+                margin: 0 auto 10px;
+            }
+            @keyframes spin {
+                0% { transform: rotate(0deg); }
+                100% { transform: rotate(360deg); }
+            }
+            
+            .coordinates {
+                position: absolute;
+                bottom: 10px;
+                left: 10px;
+                background: rgba(0,0,0,0.7);
+                color: white;
+                padding: 8px 12px;
+                border-radius: 5px;
+                font-family: monospace;
+                font-size: 12px;
+            }
+            
+            .info-grid {
+                display: grid;
+                grid-template-columns: repeat(2, 1fr);
+                gap: 15px;
+            }
+            .info-card {
+                background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
+                padding: 15px;
+                border-radius: 10px;
+            }
+            .info-card h3 {
+                font-size: 14px;
+                color: #666;
+                margin-bottom: 5px;
+            }
+            .info-card p {
+                font-size: 18px;
+                font-weight: bold;
+                color: #333;
+            }
+            
+            .instructions {
+                background: rgba(255, 255, 255, 0.95);
+                border-left: 4px solid #667eea;
+            }
+            .instructions ul {
+                margin-left: 20px;
+                line-height: 1.8;
+            }
+            
+            /* Логи */
+            .logs-panel {
+                max-height: calc(100vh - 100px);
+                display: flex;
+                flex-direction: column;
+            }
+            .logs-header {
+                display: flex;
+                justify-content: space-between;
+                align-items: center;
+                margin-bottom: 10px;
+            }
+            .logs-container {
+                background: #1e1e1e;
+                border-radius: 8px;
+                padding: 15px;
+                font-family: 'Courier New', monospace;
+                font-size: 12px;
+                color: #00ff00;
+                overflow-y: auto;
+                flex: 1;
+                max-height: 70vh;
+            }
+            .log-entry {
+                margin-bottom: 5px;
+                line-height: 1.4;
+                word-wrap: break-word;
+            }
+            .log-entry:hover {
+                background: rgba(255,255,255,0.1);
+            }
+            .logs-container::-webkit-scrollbar {
+                width: 8px;
+            }
+            .logs-container::-webkit-scrollbar-track {
+                background: #2d2d2d;
+                border-radius: 4px;
+            }
+            .logs-container::-webkit-scrollbar-thumb {
+                background: #667eea;
+                border-radius: 4px;
+            }
+            .clear-logs-btn {
+                padding: 6px 12px;
+                font-size: 12px;
+                background: #f44336;
+                color: white;
+                border: none;
+                border-radius: 5px;
+                cursor: pointer;
+            }
+            
+            @media (max-width: 1400px) {
+                .container {
+                    grid-template-columns: 1fr;
+                }
+                .right-panel {
+                    position: relative;
+                }
+            }
+        </style>
+    </head>
+    <body>
+        <div class="container">
+            <div class="header">
+                <h1>🤖 DTEK Bot Remote Control</h1>
+                <span class="status" id="status">⚪ Connecting...</span>
+            </div>
+            
+            <div class="left-panel">
+                <div class="instructions">
+                    <h3>📖 Як використовувати:</h3>
+                    <ul>
+                        <li><strong>Клікайте по скріншоту</strong> - кліки передаються в браузер бота</li>
+                        <li><strong>Оновити скріншот</strong> - отримати актуальне зображення</li>
+                        <li><strong>Пройти капчу</strong> - клікайте по елементам капчі прямо на скріншоті</li>
+                        <li>Скріншоти оновлюються автоматично кожні 3 секунди</li>
+                        <li><strong>Логи справа</strong> - показують що робить бот в реальному часі</li>
+                    </ul>
+                </div>
+                
+                <div class="control-panel">
+                    <h2>🎮 Панель управління</h2>
+                    <div class="buttons">
+                        <button class="btn-primary" onclick="refreshScreenshot()">🔄 Оновити скріншот</button>
+                        <button class="btn-success" onclick="initBrowser()">🚀 Ініціалізувати браузер</button>
+                        <button class="btn-info" onclick="manualCheck()">✅ Зробити перевірку</button>
+                        <button class="btn-danger" onclick="clearCookies()">🍪 Очистити куки</button>
+                    </div>
+                </div>
+                
+                <div class="viewer">
+                    <h2>👁️ Віддалений перегляд браузера</h2>
+                    <div class="screenshot-container">
+                        <div class="loading" id="loading">
+                            <div class="spinner"></div>
+                            <p>Загрузка...</p>
+                        </div>
+                        <img id="screenshot" style="display: none;" onclick="handleClick(event)">
+                        <div class="coordinates" id="coords">X: 0, Y: 0</div>
+                    </div>
+                </div>
+                
+                <div class="info-panel">
+                    <h2>📊 Статус бота</h2>
+                    <div class="info-grid">
+                        <div class="info-card">
+                            <h3>Браузер</h3>
+                            <p id="browser-status">-</p>
+                        </div>
+                        <div class="info-card">
+                            <h3>Остання дата</h3>
+                            <p id="last-update">-</p>
+                        </div>
+                        <div class="info-card">
+                            <h3>Куки</h3>
+                            <p id="cookies-status">-</p>
+                        </div>
+                        <div class="info-card">
+                            <h3>Останнє оновлення</h3>
+                            <p id="last-refresh">-</p>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            
+            <div class="right-panel">
+                <div class="logs-panel">
+                    <div class="logs-header">
+                        <h2>📋 Логи бота</h2>
+                        <button class="clear-logs-btn" onclick="clearLogsDisplay()">🗑️ Очистити</button>
+                    </div>
+                    <div class="logs-container" id="logs">
+                        <div class="log-entry">Завантаження логів...</div>
+                    </div>
+                </div>
+            </div>
+        </div>
+        
+        <script>
+            let autoRefresh = null;
+            let imageNaturalWidth = 0;
+            let imageNaturalHeight = 0;
+            let logsAutoScroll = true;
+            
+            async function request(endpoint, method = 'GET', body = null) {
+                const options = { method };
+                if (body) {
+                    options.headers = { 'Content-Type': 'application/json' };
+                    options.body = JSON.stringify(body);
+                }
+                const response = await fetch(endpoint, options);
+                return await response.json();
+            }
+            
+            async function refreshScreenshot() {
+                try {
+                    const data = await request('/api/screenshot');
+                    if (data.screenshot) {
+                        const img = document.getElementById('screenshot');
+                        img.src = 'data:image/png;base64,' + data.screenshot;
+                        img.style.display = 'block';
+                        document.getElementById('loading').style.display = 'none';
+                        
+                        img.onload = function() {
+                            imageNaturalWidth = img.naturalWidth;
+                            imageNaturalHeight = img.naturalHeight;
+                        };
+                        
+                        document.getElementById('last-refresh').textContent = new Date().toLocaleTimeString();
+                    }
+                } catch (e) {
+                    console.error('Error refreshing screenshot:', e);
+                }
+            }
+            
+            async function initBrowser() {
+                document.getElementById('status').textContent = '⏳ Ініціалізація...';
+                try {
+                    const data = await request('/api/init');
+                    alert(data.message);
+                    await updateStatus();
+                    await refreshScreenshot();
+                } catch (e) {
+                    alert('Помилка: ' + e.message);
+                }
+            }
+            
+            async function manualCheck() {
+                document.getElementById('status').textContent = '⏳ Перевірка...';
+                try {
+                    const data = await request('/api/check');
+                    alert(data.message);
+                    await refreshScreenshot();
+                } catch (e) {
+                    alert('Помилка: ' + e.message);
+                }
+            }
+            
+            async function clearCookies() {
+                try {
+                    const data = await request('/api/clear-cookies', 'POST');
+                    alert(data.message);
+                    await updateStatus();
+                } catch (e) {
+                    alert('Помилка: ' + e.message);
+                }
+            }
+            
+            async function handleClick(event) {
+                const img = event.target;
+                const rect = img.getBoundingClientRect();
+                
+                const scaleX = imageNaturalWidth / rect.width;
+                const scaleY = imageNaturalHeight / rect.height;
+                
+                const x = Math.round((event.clientX - rect.left) * scaleX);
+                const y = Math.round((event.clientY - rect.top) * scaleY);
+                
+                console.log(`Click: ${x}, ${y}`);
+                
+                try {
+                    const data = await request('/api/click', 'POST', { x, y });
+                    console.log(data.message);
+                    setTimeout(refreshScreenshot, 1000);
+                } catch (e) {
+                    console.error('Click error:', e);
+                }
+            }
+            
+            document.getElementById('screenshot').addEventListener('mousemove', (e) => {
+                const img = e.target;
+                const rect = img.getBoundingClientRect();
+                const scaleX = imageNaturalWidth / rect.width;
+                const scaleY = imageNaturalHeight / rect.height;
+                const x = Math.round((e.clientX - rect.left) * scaleX);
+                const y = Math.round((e.clientY - rect.top) * scaleY);
+                document.getElementById('coords').textContent = `X: ${x}, Y: ${y}`;
+            });
+            
+            async function updateStatus() {
+                try {
+                    const data = await request('/api/status');
+                    
+                    document.getElementById('browser-status').textContent = data.browser;
+                    document.getElementById('last-update').textContent = data.last_update || '-';
+                    document.getElementById('cookies-status').textContent = data.cookies;
+                    
+                    const statusElem = document.getElementById('status');
+                    if (data.browser === '✅ Відкритий') {
+                        statusElem.className = 'status online';
+                        statusElem.textContent = '🟢 Online';
+                    } else {
+                        statusElem.className = 'status offline';
+                        statusElem.textContent = '🔴 Offline';
+                    }
+                } catch (e) {
+                    console.error('Status update error:', e);
+                }
+            }
+            
+            async function updateLogs() {
+                try {
+                    const data = await request('/api/logs');
+                    const logsContainer = document.getElementById('logs');
+                    
+                    if (data.logs && data.logs.length > 0) {
+                        const shouldScroll = logsContainer.scrollHeight - logsContainer.scrollTop <= logsContainer.clientHeight + 50;
+                        
+                        logsContainer.innerHTML = data.logs.map(log => 
+                            `<div class="log-entry">${escapeHtml(log)}</div>`
+                        ).join('');
+                        
+                        if (shouldScroll && logsAutoScroll) {
+                            logsContainer.scrollTop = logsContainer.scrollHeight;
+                        }
+                    }
+                } catch (e) {
+                    console.error('Logs update error:', e);
+                }
+            }
+            
+            function escapeHtml(text) {
+                const div = document.createElement('div');
+                div.textContent = text;
+                return div.innerHTML;
+            }
+            
+            function clearLogsDisplay() {
+                document.getElementById('logs').innerHTML = '<div class="log-entry">Логи очищено локально</div>';
+            }
+            
+            // Відстежуємо scroll для автопрокрутки
+            document.getElementById('logs').addEventListener('scroll', (e) => {
+                const container = e.target;
+                logsAutoScroll = container.scrollHeight - container.scrollTop <= container.clientHeight + 50;
+            });
+            
+            function startAutoRefresh() {
+                autoRefresh = setInterval(() => {
+                    refreshScreenshot();
+                    updateStatus();
+                    updateLogs();
+                }, 3000);
+            }
+            
+            window.onload = async () => {
+                await updateStatus();
+                await updateLogs();
+                await refreshScreenshot();
+                startAutoRefresh();
+            };
+        </script>
+    </body>
+    </html>
+    """
+    return web.Response(text=html, content_type='text/html')
     """Root endpoint - VNC interface"""
     html = """
     <!DOCTYPE html>
@@ -544,6 +1067,13 @@ async def handle_clear_cookies(request):
             'success': False
         }, status=500)
 
+async def handle_logs(request):
+    """API: Отримати останні логи"""
+    return web.json_response({
+        'logs': list(log_buffer),
+        'timestamp': datetime.now().isoformat()
+    })
+
 async def handle_status(request):
     """API: Получити статус бота"""
     browser_status = "✅ Відкритий" if checker.browser else "✖️ Закритий"
@@ -568,12 +1098,13 @@ async def start_web_server():
     app.router.add_get('/api/check', handle_check)
     app.router.add_post('/api/clear-cookies', handle_clear_cookies)
     app.router.add_get('/api/status', handle_status)
+    app.router.add_get('/api/logs', handle_logs)  # Новий endpoint для логів
     
     runner = web.AppRunner(app)
     await runner.setup()
     site = web.TCPSite(runner, '0.0.0.0', PORT)
     await site.start()
-    print(f"✓ Web server started on port {PORT}")
+    log(f"✓ Web server started on port {PORT}")
 
 class DTEKChecker:
     def __init__(self):
@@ -665,13 +1196,13 @@ class DTEKChecker:
                     args=browser_args,
                     channel='chrome'
                 )
-                print("✓ Chrome запущено")
+                log("✓ Chrome запущено")
             except:
                 self.browser = await self.playwright.chromium.launch(
                     headless=True,
                     args=browser_args
                 )
-                print("✓ Chromium запущено")
+                log("✓ Chromium запущено")
             
             user_agent = self._get_random_user_agent()
             
@@ -757,7 +1288,7 @@ class DTEKChecker:
 
     async def _setup_page(self):
         """Налаштування сторінки - стабільна версія"""
-        print("Налаштування сторінки...")
+        log("🔧 Налаштування сторінки...")
         
         # Збільшений таймаут для повільних з'єднань
         await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='domcontentloaded', timeout=90000)
@@ -775,29 +1306,29 @@ class DTEKChecker:
             captcha_count = await captcha_checkbox.count()
             
             if captcha_count > 0:
-                print("⚠️ Виявлено капчу! Використовуйте веб-інтерфейс для проходження.")
-                print(f"🌐 Відкрийте веб-інтерфейс і клікніть по капчі")
+                log("⚠️ Виявлено капчу! Використовуйте веб-інтерфейс для проходження.")
+                log("🌐 Клікніть по капчі в веб-інтерфейсі")
                 
                 # Чекаємо поки капча зникне (до 5 хвилин)
                 for i in range(300):
                     await asyncio.sleep(1)
                     current_count = await captcha_checkbox.count()
                     if current_count == 0:
-                        print("✓ Капча пройдена!")
+                        log("✓ Капча пройдена!")
                         await self._save_cookies()
-                        await asyncio.sleep(2)  # Даємо час сторінці оновитися
+                        await asyncio.sleep(2)
                         break
                     
                     # Кожні 30 секунд нагадуємо
                     if i > 0 and i % 30 == 0:
-                        print(f"⏳ Очікування капчі... ({i} сек)")
+                        log(f"⏳ Очікування капчі... ({i} сек)")
                 
                 # Перевіряємо чи капча дійсно зникла
                 if await captcha_checkbox.count() > 0:
-                    print("❌ Капча не пройдена за 5 хвилин. Спробуйте знову через веб-інтерфейс.")
+                    log("❌ Капча не пройдена за 5 хвилин. Спробуйте знову.")
                     
         except Exception as e:
-            print(f"⚠ Помилка при перевірці капчі: {e}")
+            log(f"⚠ Помилка при перевірці капчі: {e}")
         
         await asyncio.sleep(2)
         
@@ -811,7 +1342,7 @@ class DTEKChecker:
             pass
         
         # Заповнюємо форму
-        print("Вводжу місто...")
+        log("📝 Вводжу місто...")
         city_input = self.page.locator('.discon-input-wrapper #city')
         await city_input.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(city_input)
@@ -825,7 +1356,7 @@ class DTEKChecker:
         await self._human_move_and_click(city_option)
         await asyncio.sleep(2)
         
-        print("Вводжу вулицю...")
+        log("📝 Вводжу вулицю...")
         street_input = self.page.locator('.discon-input-wrapper #street')
         await street_input.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(street_input)
@@ -839,7 +1370,7 @@ class DTEKChecker:
         await self._human_move_and_click(street_option)
         await asyncio.sleep(2)
         
-        print("Вводжу будинок...")
+        log("📝 Вводжу будинок...")
         house_input = self.page.locator('input#house_num')
         await house_input.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(house_input)
@@ -862,13 +1393,14 @@ class DTEKChecker:
             await update_elem.wait_for(state='visible', timeout=15000)
             self.last_update_date = await update_elem.text_content()
             self.last_update_date = self.last_update_date.strip()
-            print(f"✓ Дата оновлення: {self.last_update_date}")
+            log(f"✓ Дата оновлення: {self.last_update_date}")
         except Exception as e:
-            print(f"⚠ Не вдалося отримати дату: {e}")
+            log(f"⚠ Не вдалося отримати дату: {e}")
             self.last_update_date = "Невідомо"
         
-        print("✅ Сторінка налаштована!")
+        log("✅ Сторінка налаштована!")
         await self._save_cookies()
+        log(f"⏰ Ініціалізація завершена")
 
     async def check_for_update(self):
         """Перевіряє чи змінилась дата - оновлена версія"""
@@ -1053,20 +1585,22 @@ class DTEKChecker:
             await asyncio.sleep(0.5)
             
             # СЬОГОДНІ
-            print("\n" + "="*50)
-            print("📊 ПАРСИНГ ГРАФІКА НА СЬОГОДНІ")
-            print("="*50)
+            log("")
+            log("="*50)
+            log("📊 ПАРСИНГ ГРАФІКА НА СЬОГОДНІ")
+            log("="*50)
             
             schedule_today = await self.parse_schedule()
-            print("Роблю скріншот основного графіка...")
+            log("📸 Роблю скріншот основного графіка...")
             screenshot_main = await self.page.screenshot(full_page=True, type='png')
             screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
-            print("✓ Скріншот основного графіка готовий")
+            log("✓ Скріншот основного графіка готовий")
             
             # ЗАВТРА
-            print("\n" + "="*50)
-            print("📊 ПАРСИНГ ГРАФІКА НА ЗАВТРА")
-            print("="*50)
+            log("")
+            log("="*50)
+            log("📊 ПАРСИНГ ГРАФІКА НА ЗАВТРА")
+            log("="*50)
             
             second_date = None
             screenshot_tomorrow_cropped = None
@@ -1078,33 +1612,33 @@ class DTEKChecker:
                 
                 second_date = await date_selector.text_content()
                 second_date = second_date.strip()
-                print(f"Дата другого графіка: {second_date}")
+                log(f"📅 Дата другого графіка: {second_date}")
                 
                 await date_selector.click()
-                print("✓ Клікнув на другий графік, чекаю завантаження...")
+                log("✓ Клікнув на другий графік, чекаю завантаження...")
                 await asyncio.sleep(2)
                 
                 # Закриваємо опрос якщо з'явився
                 await self._close_survey_if_present()
                 
-                print("Роблю скріншот другого графіка...")
+                log("📸 Роблю скріншот другого графіка...")
                 schedule_tomorrow = await self.parse_schedule()
                 screenshot_tomorrow = await self.page.screenshot(full_page=True, type='png')
                 screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
-                print("✓ Скріншот другого графіка готовий")
+                log("✓ Скріншот другого графіка готовий")
                 
                 # Повертаємося назад
-                print("Повертаюся на перший графік...")
+                log("🔙 Повертаюся на перший графік...")
                 first_date = self.page.locator('div.date:nth-child(1)')
                 await first_date.wait_for(state='visible', timeout=10000)
                 await first_date.click()
                 await asyncio.sleep(2)
-                print(f"✓ Повернувся на перший графік")
+                log(f"✓ Повернувся на перший графік")
                 
             except asyncio.TimeoutError:
-                print(f"⚠ Таймаут при роботі зі другим графіком")
+                log(f"⚠ Таймаут при роботі зі другим графіком")
             except Exception as e:
-                print(f"⚠ Не вдалося отримати другий графік: {e}")
+                log(f"⚠ Не вдалося отримати другий графік: {e}")
             
             return {
                 'screenshot_main': screenshot_main_cropped,
@@ -1117,9 +1651,7 @@ class DTEKChecker:
             }
             
         except Exception as e:
-            print(f"✖️ Помилка при створенні скріншотів: {e}")
-            import traceback
-            traceback.print_exc()
+            log(f"✖️ Помилка при створенні скріншотів: {e}")
             raise
 
     async def close_browser(self):
@@ -1167,46 +1699,66 @@ async def save_check(update_date, schedule_hash, schedule_data):
 
 @bot.event
 async def on_ready():
-    print(f'✓ {bot.user} підключено до Discord!')
-    print(f'✓ Моніторинг каналу: {CHANNEL_ID}')
-    print(f'✓ Інтервал перевірки: кожні 5 хвилин')
-    print(f'🌐 Веб-інтерфейс для проходження капчі запущено на порту {PORT}')
-    print(f'🥷 STEALTH MODE активовано')
+    log(f'✓ {bot.user} підключено до Discord!')
+    log(f'✓ Моніторинг каналу: {CHANNEL_ID}')
+    log(f'✓ Інтервал перевірки: кожні 5 хвилин')
+    log(f'🌐 Веб-інтерфейс запущено на порту {PORT}')
+    log(f'🥷 STEALTH MODE активовано')
+    
     await init_db_pool()
     await start_web_server()
     
-    print("💡 Відкрийте веб-інтерфейс і натисніть 'Ініціалізувати браузер'")
-    print(f"🌐 URL: http://localhost:{PORT}")
-    print("🎉 Бот готовий до роботи!")
+    log("")
+    log("="*60)
+    log("💡 ВАЖЛИВО: Браузер ще не ініціалізовано!")
+    log(f"🌐 Відкрийте веб-інтерфейс: http://localhost:{PORT}")
+    log("🖱️  Натисніть кнопку 'Ініціалізувати браузер'")
+    log("="*60)
+    log("")
+    
+    log("🎉 Бот готовий до роботи!")
+    log(f"⏰ Поточний час: {datetime.now().strftime('%H:%M:%S')}")
     
     check_schedule.start()
+    log("✓ Автоматична перевірка запущена (кожні 5 хвилин)")
+    log("")
 
 @tasks.loop(minutes=5)
 async def check_schedule():
     """Періодична перевірка кожні 5 хвилин"""
     channel = None
     try:
+        log("")
+        log("="*50)
+        log(f"⏰ Час для автоматичної перевірки")
+        log("="*50)
+        
         if not checker.browser or not checker.page:
-            print("⏸️ Браузер не ініціалізовано, пропускаю перевірку")
+            log("⏸️ Браузер не ініціалізовано, пропускаю перевірку")
+            log("💡 Відкрийте веб-інтерфейс та натисніть 'Ініціалізувати браузер'")
+            log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
+            log("="*50)
+            log("")
             return
         
         channel = bot.get_channel(CHANNEL_ID)
         if not channel:
-            print(f"✖️ Канал {CHANNEL_ID} не знайдено!")
+            log(f"✖️ Канал {CHANNEL_ID} не знайдено!")
             return
         
-        print(f"\n{'='*50}")
-        print(f"[{datetime.now()}] Запуск автоматичної перевірки...")
-        print(f"{'='*50}")
+        log("🔍 Починаю перевірку оновлень...")
         
         has_update = await checker.check_for_update()
         
         if not has_update:
-            print(f"ℹ️ Без змін (дата не оновилась)")
-            print(f"{'='*50}\n")
+            log(f"ℹ️ Без змін (дата не оновилась)")
+            log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
+            log("="*50)
+            log("")
             return
         
         # Дата оновилась - робимо скріншоти і парсимо
+        log("📸 Дата оновилась! Роблю скріншоти...")
         result = await asyncio.wait_for(checker.make_screenshots(), timeout=180)
         
         # Перевіряємо чи змінився графік
@@ -1218,8 +1770,10 @@ async def check_schedule():
         # Порівнюємо графіки
         changes_text = None
         if last_check and last_check['schedule_hash'] == current_hash:
-            print("⏸️ Графік не змінився (тільки дата оновилась)")
-            print(f"{'='*50}\n")
+            log("⏸️ Графік не змінився (тільки дата оновилась)")
+            log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
+            log("="*50)
+            log("")
             return
         elif last_check and last_check.get('schedule_data'):
             # Є попередній графік - порівнюємо
@@ -1227,7 +1781,7 @@ async def check_schedule():
             changes_text = checker._compare_schedules(old_schedule, schedule_today)
         
         # Графік змінився - відправляємо!
-        print("✅ Графік змінився - відправляю!")
+        log("✅ Графік змінився - відправляю в Discord!")
         
         # Зберігаємо в БД
         await save_check(result['update_date'], current_hash, schedule_today)
@@ -1295,12 +1849,16 @@ async def check_schedule():
             else:
                 print("⏸️ Завтра немає відключень - не відправляю")
         
-        print(f"✓ Повідомлення відправлено в Discord")
-        print(f"{'='*50}\n")
+        log(f"✓ Повідомлення відправлено в Discord")
+        log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
+        log("="*50)
+        log("")
         
     except asyncio.TimeoutError:
-        print(f"⏱️ ТАЙМАУТ: Операція зайняла більше 3 хвилин")
-        print(f"{'='*50}\n")
+        log(f"⏱️ ТАЙМАУТ: Операція зайняла більше 3 хвилин")
+        log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
+        log("="*50)
+        log("")
         if channel:
             try:
                 error_embed = discord.Embed(
@@ -1313,9 +1871,8 @@ async def check_schedule():
             except:
                 pass
     except Exception as e:
-        print(f"✖️ Помилка в check_schedule: {e}")
-        import traceback
-        traceback.print_exc()
+        log(f"✖️ Помилка в check_schedule: {e}")
+        log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
         
         if channel:
             try:
@@ -1333,7 +1890,9 @@ async def check_schedule():
 async def before_check_schedule():
     """Чекаємо, поки бот буде готовий"""
     await bot.wait_until_ready()
-    print("⏳ Очікування готовності бота...")
+    log("⏳ Очікування готовності бота завершено")
+    log("✓ Автоматичні перевірки почнуться через 5 хвилин")
+    log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
 
 @bot.command(name='check')
 async def manual_check(ctx):
@@ -1528,16 +2087,33 @@ async def stop_bot(ctx):
 
 if __name__ == '__main__':
     try:
-        print("🤖 Запуск Discord бота DTEK з веб-інтерфейсом...")
-        print(f"📅 Дата: {datetime.now()}")
-        print("🌐 Веб-інтерфейс для управління браузером включено")
+        log("")
+        log("="*60)
+        log("🤖 ЗАПУСК DISCORD БОТА DTEK")
+        log("="*60)
+        log(f"📅 Дата і час запуску: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        log(f"🌐 Порт веб-інтерфейсу: {PORT}")
+        log(f"📢 Discord канал: {CHANNEL_ID}")
+        log(f"💾 База даних: {'✓ Налаштована' if DATABASE_URL else '✗ Не налаштована'}")
+        log("="*60)
+        log("")
+        
         bot.run(DISCORD_TOKEN)
     except KeyboardInterrupt:
-        print("\n🛑 Остановка бота...")
+        log("")
+        log("🛑 Отримано сигнал зупинки...")
+    except Exception as e:
+        log("")
+        log(f"❌ КРИТИЧНА ПОМИЛКА: {e}")
     finally:
+        log("")
+        log("🧹 Очищення ресурсів...")
         try:
             asyncio.run(checker._save_cookies())
             asyncio.run(checker.close_browser())
             asyncio.run(close_db_pool())
         except:
             pass
+        log("✓ Бот зупинено")
+        log(f"📅 Час зупинки: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        log("")
