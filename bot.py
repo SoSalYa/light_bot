@@ -25,7 +25,7 @@ PORT = int(os.getenv('PORT', 10000))
 db_pool = None
 
 # Логування в пам'яті для веб-інтерфейсу
-log_buffer = deque(maxlen=500)  # Зберігаємо останні 500 логів
+log_buffer = deque(maxlen=500)
 
 def log(message):
     """Логування з виводом в консоль і збереженням для веб-інтерфейсу"""
@@ -52,7 +52,6 @@ async def init_db_pool():
         )
         log("✓ Database pool створено")
         
-        # Створюємо таблицю якщо не існує
         async with db_pool.acquire() as conn:
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS dtek_checks (
@@ -60,6 +59,8 @@ async def init_db_pool():
                     update_date TEXT,
                     schedule_hash TEXT,
                     schedule_data JSONB,
+                    schedule_tomorrow_hash TEXT,
+                    schedule_tomorrow_data JSONB,
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
@@ -271,7 +272,6 @@ async def handle_root(request):
                 line-height: 1.8;
             }
             
-            /* Логи */
             .logs-panel {
                 max-height: calc(100vh - 100px);
                 display: flex;
@@ -563,7 +563,6 @@ async def handle_root(request):
                 document.getElementById('logs').innerHTML = '<div class="log-entry">Логи очищено локально</div>';
             }
             
-            // Відстежуємо scroll для автопрокрутки
             document.getElementById('logs').addEventListener('scroll', (e) => {
                 const container = e.target;
                 logsAutoScroll = container.scrollHeight - container.scrollTop <= container.clientHeight + 50;
@@ -580,404 +579,6 @@ async def handle_root(request):
             window.onload = async () => {
                 await updateStatus();
                 await updateLogs();
-                await refreshScreenshot();
-                startAutoRefresh();
-            };
-        </script>
-    </body>
-    </html>
-    """
-    return web.Response(text=html, content_type='text/html')
-    """Root endpoint - VNC interface"""
-    html = """
-    <!DOCTYPE html>
-    <html>
-    <head>
-        <meta charset="UTF-8">
-        <meta name="viewport" content="width=device-width, initial-scale=1.0">
-        <title>DTEK Bot Remote Control</title>
-        <style>
-            * { margin: 0; padding: 0; box-sizing: border-box; }
-            body {
-                font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                min-height: 100vh;
-                padding: 20px;
-            }
-            .container {
-                max-width: 1400px;
-                margin: 0 auto;
-            }
-            .header {
-                text-align: center;
-                color: white;
-                margin-bottom: 30px;
-            }
-            .header h1 {
-                font-size: 2.5em;
-                margin-bottom: 10px;
-                text-shadow: 2px 2px 4px rgba(0,0,0,0.3);
-            }
-            .status {
-                display: inline-block;
-                padding: 8px 20px;
-                background: rgba(255,255,255,0.2);
-                border-radius: 20px;
-                font-size: 14px;
-                backdrop-filter: blur(10px);
-            }
-            .status.online { background: rgba(76, 175, 80, 0.3); }
-            .status.offline { background: rgba(244, 67, 54, 0.3); }
-            
-            .control-panel {
-                background: white;
-                border-radius: 15px;
-                padding: 20px;
-                margin-bottom: 20px;
-                box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-            }
-            .control-panel h2 {
-                margin-bottom: 15px;
-                color: #333;
-            }
-            .buttons {
-                display: flex;
-                gap: 10px;
-                flex-wrap: wrap;
-            }
-            button {
-                padding: 12px 24px;
-                border: none;
-                border-radius: 8px;
-                cursor: pointer;
-                font-size: 14px;
-                font-weight: 600;
-                transition: all 0.3s;
-                box-shadow: 0 4px 6px rgba(0,0,0,0.1);
-            }
-            button:hover {
-                transform: translateY(-2px);
-                box-shadow: 0 6px 12px rgba(0,0,0,0.15);
-            }
-            button:active {
-                transform: translateY(0);
-            }
-            .btn-primary {
-                background: linear-gradient(135deg, #667eea 0%, #764ba2 100%);
-                color: white;
-            }
-            .btn-success {
-                background: linear-gradient(135deg, #56ab2f 0%, #a8e063 100%);
-                color: white;
-            }
-            .btn-danger {
-                background: linear-gradient(135deg, #eb3349 0%, #f45c43 100%);
-                color: white;
-            }
-            .btn-info {
-                background: linear-gradient(135deg, #3a7bd5 0%, #00d2ff 100%);
-                color: white;
-            }
-            
-            .viewer {
-                background: white;
-                border-radius: 15px;
-                padding: 20px;
-                box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-                position: relative;
-            }
-            .viewer h2 {
-                margin-bottom: 15px;
-                color: #333;
-            }
-            .screenshot-container {
-                position: relative;
-                width: 100%;
-                background: #f0f0f0;
-                border-radius: 10px;
-                overflow: hidden;
-                min-height: 600px;
-                display: flex;
-                align-items: center;
-                justify-content: center;
-            }
-            #screenshot {
-                width: 100%;
-                height: auto;
-                display: block;
-                cursor: crosshair;
-            }
-            .loading {
-                position: absolute;
-                top: 50%;
-                left: 50%;
-                transform: translate(-50%, -50%);
-                text-align: center;
-                color: #999;
-            }
-            .spinner {
-                border: 4px solid #f3f3f3;
-                border-top: 4px solid #667eea;
-                border-radius: 50%;
-                width: 50px;
-                height: 50px;
-                animation: spin 1s linear infinite;
-                margin: 0 auto 10px;
-            }
-            @keyframes spin {
-                0% { transform: rotate(0deg); }
-                100% { transform: rotate(360deg); }
-            }
-            
-            .coordinates {
-                position: absolute;
-                bottom: 10px;
-                left: 10px;
-                background: rgba(0,0,0,0.7);
-                color: white;
-                padding: 8px 12px;
-                border-radius: 5px;
-                font-family: monospace;
-                font-size: 12px;
-            }
-            
-            .info-panel {
-                background: white;
-                border-radius: 15px;
-                padding: 20px;
-                margin-top: 20px;
-                box-shadow: 0 10px 40px rgba(0,0,0,0.2);
-            }
-            .info-grid {
-                display: grid;
-                grid-template-columns: repeat(auto-fit, minmax(250px, 1fr));
-                gap: 15px;
-            }
-            .info-card {
-                background: linear-gradient(135deg, #f5f7fa 0%, #c3cfe2 100%);
-                padding: 15px;
-                border-radius: 10px;
-            }
-            .info-card h3 {
-                font-size: 14px;
-                color: #666;
-                margin-bottom: 5px;
-            }
-            .info-card p {
-                font-size: 18px;
-                font-weight: bold;
-                color: #333;
-            }
-            
-            .instructions {
-                background: rgba(255, 255, 255, 0.95);
-                padding: 20px;
-                border-radius: 10px;
-                margin-bottom: 20px;
-                border-left: 4px solid #667eea;
-            }
-            .instructions h3 {
-                color: #667eea;
-                margin-bottom: 10px;
-            }
-            .instructions ul {
-                margin-left: 20px;
-                line-height: 1.8;
-            }
-        </style>
-    </head>
-    <body>
-        <div class="container">
-            <div class="header">
-                <h1>🤖 DTEK Bot Remote Control</h1>
-                <span class="status" id="status">⚪ Connecting...</span>
-            </div>
-            
-            <div class="instructions">
-                <h3>📖 Як використовувати:</h3>
-                <ul>
-                    <li><strong>Клікайте по скріншоту</strong> - кліки передаються в браузер бота</li>
-                    <li><strong>Оновити скріншот</strong> - отримати актуальне зображення</li>
-                    <li><strong>Пройти капчу</strong> - клікайте по елементам капчі прямо на скріншоті</li>
-                    <li>Скріншоти оновлюються автоматично кожні 3 секунди</li>
-                </ul>
-            </div>
-            
-            <div class="control-panel">
-                <h2>🎮 Панель управління</h2>
-                <div class="buttons">
-                    <button class="btn-primary" onclick="refreshScreenshot()">🔄 Оновити скріншот</button>
-                    <button class="btn-success" onclick="initBrowser()">🚀 Ініціалізувати браузер</button>
-                    <button class="btn-info" onclick="manualCheck()">✅ Зробити перевірку</button>
-                    <button class="btn-danger" onclick="clearCookies()">🍪 Очистити куки</button>
-                </div>
-            </div>
-            
-            <div class="viewer">
-                <h2>👁️ Віддалений перегляд браузера</h2>
-                <div class="screenshot-container">
-                    <div class="loading" id="loading">
-                        <div class="spinner"></div>
-                        <p>Загрузка...</p>
-                    </div>
-                    <img id="screenshot" style="display: none;" onclick="handleClick(event)">
-                    <div class="coordinates" id="coords">X: 0, Y: 0</div>
-                </div>
-            </div>
-            
-            <div class="info-panel">
-                <h2>📊 Статус бота</h2>
-                <div class="info-grid">
-                    <div class="info-card">
-                        <h3>Браузер</h3>
-                        <p id="browser-status">-</p>
-                    </div>
-                    <div class="info-card">
-                        <h3>Остання дата</h3>
-                        <p id="last-update">-</p>
-                    </div>
-                    <div class="info-card">
-                        <h3>Куки</h3>
-                        <p id="cookies-status">-</p>
-                    </div>
-                    <div class="info-card">
-                        <h3>Останнє оновлення</h3>
-                        <p id="last-refresh">-</p>
-                    </div>
-                </div>
-            </div>
-        </div>
-        
-        <script>
-            let autoRefresh = null;
-            let imageNaturalWidth = 0;
-            let imageNaturalHeight = 0;
-            
-            async function request(endpoint, method = 'GET', body = null) {
-                const options = { method };
-                if (body) {
-                    options.headers = { 'Content-Type': 'application/json' };
-                    options.body = JSON.stringify(body);
-                }
-                const response = await fetch(endpoint, options);
-                return await response.json();
-            }
-            
-            async function refreshScreenshot() {
-                try {
-                    const data = await request('/api/screenshot');
-                    if (data.screenshot) {
-                        const img = document.getElementById('screenshot');
-                        img.src = 'data:image/png;base64,' + data.screenshot;
-                        img.style.display = 'block';
-                        document.getElementById('loading').style.display = 'none';
-                        
-                        img.onload = function() {
-                            imageNaturalWidth = img.naturalWidth;
-                            imageNaturalHeight = img.naturalHeight;
-                        };
-                        
-                        document.getElementById('last-refresh').textContent = new Date().toLocaleTimeString();
-                    }
-                } catch (e) {
-                    console.error('Error refreshing screenshot:', e);
-                }
-            }
-            
-            async function initBrowser() {
-                document.getElementById('status').textContent = '⏳ Ініціалізація...';
-                try {
-                    const data = await request('/api/init');
-                    alert(data.message);
-                    await updateStatus();
-                    await refreshScreenshot();
-                } catch (e) {
-                    alert('Помилка: ' + e.message);
-                }
-            }
-            
-            async function manualCheck() {
-                document.getElementById('status').textContent = '⏳ Перевірка...';
-                try {
-                    const data = await request('/api/check');
-                    alert(data.message);
-                    await refreshScreenshot();
-                } catch (e) {
-                    alert('Помилка: ' + e.message);
-                }
-            }
-            
-            async function clearCookies() {
-                try {
-                    const data = await request('/api/clear-cookies', 'POST');
-                    alert(data.message);
-                    await updateStatus();
-                } catch (e) {
-                    alert('Помилка: ' + e.message);
-                }
-            }
-            
-            async function handleClick(event) {
-                const img = event.target;
-                const rect = img.getBoundingClientRect();
-                
-                const scaleX = imageNaturalWidth / rect.width;
-                const scaleY = imageNaturalHeight / rect.height;
-                
-                const x = Math.round((event.clientX - rect.left) * scaleX);
-                const y = Math.round((event.clientY - rect.top) * scaleY);
-                
-                console.log(`Click: ${x}, ${y}`);
-                
-                try {
-                    const data = await request('/api/click', 'POST', { x, y });
-                    console.log(data.message);
-                    setTimeout(refreshScreenshot, 1000);
-                } catch (e) {
-                    console.error('Click error:', e);
-                }
-            }
-            
-            document.getElementById('screenshot').addEventListener('mousemove', (e) => {
-                const img = e.target;
-                const rect = img.getBoundingClientRect();
-                const scaleX = imageNaturalWidth / rect.width;
-                const scaleY = imageNaturalHeight / rect.height;
-                const x = Math.round((e.clientX - rect.left) * scaleX);
-                const y = Math.round((e.clientY - rect.top) * scaleY);
-                document.getElementById('coords').textContent = `X: ${x}, Y: ${y}`;
-            });
-            
-            async function updateStatus() {
-                try {
-                    const data = await request('/api/status');
-                    
-                    document.getElementById('browser-status').textContent = data.browser;
-                    document.getElementById('last-update').textContent = data.last_update || '-';
-                    document.getElementById('cookies-status').textContent = data.cookies;
-                    
-                    const statusElem = document.getElementById('status');
-                    if (data.browser === '✅ Відкритий') {
-                        statusElem.className = 'status online';
-                        statusElem.textContent = '🟢 Online';
-                    } else {
-                        statusElem.className = 'status offline';
-                        statusElem.textContent = '🔴 Offline';
-                    }
-                } catch (e) {
-                    console.error('Status update error:', e);
-                }
-            }
-            
-            function startAutoRefresh() {
-                autoRefresh = setInterval(() => {
-                    refreshScreenshot();
-                    updateStatus();
-                }, 3000);
-            }
-            
-            window.onload = async () => {
-                await updateStatus();
                 await refreshScreenshot();
                 startAutoRefresh();
             };
@@ -1098,7 +699,7 @@ async def start_web_server():
     app.router.add_get('/api/check', handle_check)
     app.router.add_post('/api/clear-cookies', handle_clear_cookies)
     app.router.add_get('/api/status', handle_status)
-    app.router.add_get('/api/logs', handle_logs)  # Новий endpoint для логів
+    app.router.add_get('/api/logs', handle_logs)
     
     runner = web.AppRunner(app)
     await runner.setup()
@@ -1226,9 +827,8 @@ class DTEKChecker:
             await self._save_cookies()
     
     async def _close_survey_if_present(self):
-        """Закриває опрос якщо він з'явився - виправлена версія"""
+        """Закриває опрос якщо він з'явився"""
         try:
-            # 1. Шукаємо ВИДИМЕ модальне вікно опросу через JavaScript
             modal_found = await self.page.evaluate("""
                 () => {
                     const modals = document.querySelectorAll('[id^="modal-questionnaire-welcome-"]');
@@ -1243,64 +843,41 @@ class DTEKChecker:
             """)
             
             if modal_found:
-                print(f"✓ Знайдено модальне вікно опросу: {modal_found}")
-                
-                # Шукаємо кнопку закриття ТІЛЬКИ всередині цього модального вікна
+                log(f"✓ Знайдено модальне вікно опросу: {modal_found}")
                 close_selector = f"#{modal_found} .modal__close"
                 try:
                     close_btn = self.page.locator(close_selector).first
                     if await close_btn.is_visible():
                         await close_btn.click()
                         await asyncio.sleep(1)
-                        print(f"✓ Опрос закрито через селектор: {close_selector}")
+                        log(f"✓ Опрос закрито")
                         return True
                 except:
                     pass
             
-            # 2. Альтернативний метод - шукаємо ВИДИМУ кнопку закриття опросу
             try:
-                # Шукаємо кнопку з текстом закриття, яка ВИДИМА
                 close_by_text = self.page.locator('button:has-text("×")').first
                 if await close_by_text.is_visible(timeout=1000):
                     await close_by_text.click()
                     await asyncio.sleep(1)
-                    print("✓ Опрос закрито через символ ×")
+                    log("✓ Опрос закрито через символ ×")
                     return True
             except:
                 pass
             
             return False
-                    
         except Exception as e:
-            # Не логуємо помилки якщо просто не знайшли опрос
-            return False
-
-    async def _wait_and_close_survey(self, timeout=3):
-        """Чекає появи опросу і закриває його"""
-        try:
-            for i in range(timeout):
-                if await self._close_survey_if_present():
-                    return True
-                await asyncio.sleep(1)
-            return False
-        except:
             return False
 
     async def _setup_page(self):
-        """Налаштування сторінки - стабільна версія"""
+        """Налаштування сторінки"""
         log("🔧 Налаштування сторінки...")
         
-        # Збільшений таймаут для повільних з'єднань
         await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='domcontentloaded', timeout=90000)
-        
-        # Чекаємо повного завантаження
         await asyncio.sleep(5)
-        
-        # Пробуємо закрити опрос одразу після завантаження
         await self._close_survey_if_present()
         await asyncio.sleep(1)
         
-        # Перевіряємо капчу
         try:
             captcha_checkbox = self.page.locator('iframe[src*="checkbox"]')
             captcha_count = await captcha_checkbox.count()
@@ -1309,7 +886,6 @@ class DTEKChecker:
                 log("⚠️ Виявлено капчу! Використовуйте веб-інтерфейс для проходження.")
                 log("🌐 Клікніть по капчі в веб-інтерфейсі")
                 
-                # Чекаємо поки капча зникне (до 5 хвилин)
                 for i in range(300):
                     await asyncio.sleep(1)
                     current_count = await captcha_checkbox.count()
@@ -1319,11 +895,9 @@ class DTEKChecker:
                         await asyncio.sleep(2)
                         break
                     
-                    # Кожні 30 секунд нагадуємо
                     if i > 0 and i % 30 == 0:
                         log(f"⏳ Очікування капчі... ({i} сек)")
                 
-                # Перевіряємо чи капча дійсно зникла
                 if await captcha_checkbox.count() > 0:
                     log("❌ Капча не пройдена за 5 хвилин. Спробуйте знову.")
                     
@@ -1332,7 +906,6 @@ class DTEKChecker:
         
         await asyncio.sleep(2)
         
-        # Закриваємо банер якщо є
         try:
             close_btn = self.page.locator('button.m-attention__close')
             if await close_btn.count() > 0:
@@ -1341,7 +914,6 @@ class DTEKChecker:
         except:
             pass
         
-        # Заповнюємо форму
         log("📝 Вводжу місто...")
         city_input = self.page.locator('.discon-input-wrapper #city')
         await city_input.wait_for(state='visible', timeout=15000)
@@ -1384,10 +956,8 @@ class DTEKChecker:
         await self._human_move_and_click(house_option)
         await asyncio.sleep(3)
         
-        # Пробуємо закрити опрос якщо з'явився після заповнення
         await self._close_survey_if_present()
         
-        # Отримуємо дату оновлення
         try:
             update_elem = self.page.locator('span.update')
             await update_elem.wait_for(state='visible', timeout=15000)
@@ -1400,38 +970,46 @@ class DTEKChecker:
         
         log("✅ Сторінка налаштована!")
         await self._save_cookies()
-        log(f"⏰ Ініціалізація завершена")
 
     async def check_for_update(self):
-        """Перевіряє чи змінилась дата - оновлена версія"""
+        """Перевіряє чи змінилась дата"""
         try:
-            # Закриваємо опрос ПЕРЕД перевіркою
             await self._close_survey_if_present()
             
             if random.random() < 0.3:
                 await self._random_mouse_movements()
             
+            log("🔍 Читаю дату оновлення...")
             update_elem = self.page.locator('span.update')
-            await update_elem.wait_for(state='visible', timeout=10000)
+            
+            try:
+                await update_elem.wait_for(state='visible', timeout=15000)
+            except asyncio.TimeoutError:
+                log("⚠️ Елемент дати не з'явився за 15 секунд, перезавантажую сторінку...")
+                await self.page.reload(wait_until='domcontentloaded', timeout=30000)
+                await asyncio.sleep(3)
+                await update_elem.wait_for(state='visible', timeout=15000)
+            
             current_date = await update_elem.text_content()
             current_date = current_date.strip()
             
-            print(f"Поточна дата: {current_date}, Остання: {self.last_update_date}")
+            log(f"📅 Поточна дата: {current_date}")
+            log(f"📅 Остання дата: {self.last_update_date}")
             
             if current_date != self.last_update_date:
-                print("🔢 ОНОВЛЕННЯ ВИЯВЛЕНО!")
+                log("🔔 ОНОВЛЕННЯ ВИЯВЛЕНО!")
                 self.last_update_date = current_date
                 await self._save_cookies()
                 return True
+            
+            log("ℹ️ Дата не змінилась")
             return False
         except Exception as e:
-            print(f"Помилка при перевірці: {e}")
+            log(f"❌ Помилка при перевірці: {e}")
             return False
 
     async def parse_schedule(self):
-        """
-        Парсить графік відключень з активної вкладки
-        """
+        """Парсить графік відключень з активної вкладки"""
         try:
             date_elem = self.page.locator('.date.active')
             schedule_date = await date_elem.text_content()
@@ -1443,7 +1021,6 @@ class DTEKChecker:
                 'schedule': {}
             }
             
-            # Парсимо години (2-25)
             for i in range(2, 26):
                 try:
                     hour_selector = f'.active > table th:nth-child({i})'
@@ -1454,7 +1031,6 @@ class DTEKChecker:
                 except:
                     result['hours'].append(f"??:??")
             
-            # Парсимо статуси (2-25)
             for i in range(2, 26):
                 try:
                     cell_selector = f'.active > table td:nth-child({i})'
@@ -1464,17 +1040,16 @@ class DTEKChecker:
                     
                     hour = result['hours'][i-2]
                     
-                    # Визначаємо статус
                     if 'cell-scheduled' in cell_class:
-                        status = 'scheduled'  # Відключення
+                        status = 'scheduled'
                     elif 'cell-non-scheduled' in cell_class:
-                        status = 'powered'  # Світло є
+                        status = 'powered'
                     elif 'cell-first-half' in cell_class:
-                        status = 'first-half'  # Перші 30 хв відключення
+                        status = 'first-half'
                     elif 'cell-second-half' in cell_class:
-                        status = 'second-half'  # Другі 30 хв відключення
+                        status = 'second-half'
                     else:
-                        status = 'powered'  # За замовчуванням - світло є
+                        status = 'powered'
                     
                     result['schedule'][hour] = {
                         'status': status,
@@ -1491,7 +1066,7 @@ class DTEKChecker:
             return result
             
         except Exception as e:
-            print(f"Помилка парсингу: {e}")
+            log(f"❌ Помилка парсингу: {e}")
             return None
 
     def _calculate_schedule_hash(self, schedule):
@@ -1499,12 +1074,10 @@ class DTEKChecker:
         if not schedule:
             return None
         
-        # Створюємо рядок з усіх статусів
         status_string = ""
         for hour in sorted(schedule['schedule'].keys()):
             status_string += f"{hour}:{schedule['schedule'][hour]['status']};"
         
-        # Хешуємо
         return hashlib.md5(status_string.encode()).hexdigest()
 
     def _has_any_outages(self, schedule):
@@ -1519,41 +1092,121 @@ class DTEKChecker:
         
         return False
 
+    def _count_outage_hours(self, schedule):
+        """Підраховує кількість годин з відключенням"""
+        if not schedule or not schedule.get('schedule'):
+            return 0
+        
+        count = 0
+        for hour_data in schedule['schedule'].values():
+            status = hour_data.get('status')
+            if status in ['scheduled', 'first-half', 'second-half']:
+                count += 1
+        
+        return count
+
     def _compare_schedules(self, old_schedule, new_schedule):
-        """
-        Порівнює два графіки і повертає текстовий опис змін
-        """
+        """Порівнює два графіки і повертає текстовий опис змін"""
+        log("🔍 === ПОЧАТОК ПОРІВНЯННЯ ГРАФІКІВ ===")
+        
+        log(f"🔍 Тип old_schedule: {type(old_schedule)}")
+        log(f"🔍 Тип new_schedule: {type(new_schedule)}")
+        
+        if isinstance(old_schedule, str):
+            log("⚠️ old_schedule є строкою, парсимо JSON...")
+            try:
+                old_schedule = json.loads(old_schedule)
+                log("✓ JSON успішно розпарсено")
+            except Exception as e:
+                log(f"❌ Помилка парсингу JSON: {e}")
+                return "📊 Помилка парсингу старого графіка"
+        
+        if isinstance(new_schedule, str):
+            log("⚠️ new_schedule є строкою, парсимо JSON...")
+            try:
+                new_schedule = json.loads(new_schedule)
+                log("✓ JSON успішно розпарсено")
+            except Exception as e:
+                log(f"❌ Помилка парсингу JSON: {e}")
+                return "📊 Помилка парсингу нового графіка"
+        
         if not old_schedule or not new_schedule:
+            log("⚠️ Один з графіків порожній")
             return "📊 Перша перевірка - немає з чим порівнювати"
         
-        changes = []
-        added_outages = []  # Години де з'явилися відключення
-        removed_outages = []  # Години де відключення зникли
+        if 'schedule' not in old_schedule:
+            log(f"❌ 'schedule' відсутній в old_schedule. Ключі: {old_schedule.keys()}")
+            return "📊 Некоректний формат старого графіка"
         
-        # Порівнюємо кожну годину
+        if 'schedule' not in new_schedule:
+            log(f"❌ 'schedule' відсутній в new_schedule. Ключі: {new_schedule.keys()}")
+            return "📊 Некоректний формат нового графіка"
+        
+        log(f"✓ Кількість годин в старому графіку: {len(old_schedule['schedule'])}")
+        log(f"✓ Кількість годин в новому графіку: {len(new_schedule['schedule'])}")
+        
+        # Підраховуємо години з відключеннями
+        old_outage_count = self._count_outage_hours(old_schedule)
+        new_outage_count = self._count_outage_hours(new_schedule)
+        
+        log(f"📊 Старий графік: {old_outage_count} годин без світла")
+        log(f"📊 Новий графік: {new_outage_count} годин без світла")
+        
+        added_outages = []
+        removed_outages = []
+        
         for hour in new_schedule['schedule'].keys():
             old_status = old_schedule['schedule'].get(hour, {}).get('status', 'unknown')
             new_status = new_schedule['schedule'][hour]['status']
             
-            # Перевіряємо зміни
+            if old_status != new_status:
+                log(f"🔄 Зміна в {hour}: {old_status} → {new_status}")
+            
             if old_status in ['powered'] and new_status in ['scheduled', 'first-half', 'second-half']:
-                # Відключення додалось
                 added_outages.append(hour)
+                log(f"⚡ {hour}: З'явилось відключення")
             elif old_status in ['scheduled', 'first-half', 'second-half'] and new_status in ['powered']:
-                # Відключення прибралось
                 removed_outages.append(hour)
+                log(f"✅ {hour}: З'явилось світло")
         
-        # Формуємо текст
+        log(f"📊 Підсумок: додано відключень: {len(added_outages)}, прибрано: {len(removed_outages)}")
+        
+        # Формуємо підсумковий текст
         if not added_outages and not removed_outages:
-            return None  # Немає змін
+            log("ℹ️ Графік не змінився")
+            return None
         
-        if added_outages:
-            changes.append(f"⚡ **Додалось відключення:** {', '.join(added_outages)}")
+        # Перевіряємо чи просто переставили
+        if len(added_outages) == len(removed_outages) and len(added_outages) > 0:
+            result = f"🔄 **Переставили відключення**\n"
+            result += f"⚡ Тепер відключення: {', '.join(added_outages)}\n"
+            result += f"✅ Тепер світло: {', '.join(removed_outages)}"
+            log(f"✓ Результат: Переставили відключення")
+        else:
+            result_parts = []
+            
+            if new_outage_count > old_outage_count:
+                diff = new_outage_count - old_outage_count
+                result_parts.append(f"⚡ **Годин без світла: +{diff}**")
+                if added_outages:
+                    result_parts.append(f"Додалось відключення: {', '.join(added_outages)}")
+            elif new_outage_count < old_outage_count:
+                diff = old_outage_count - new_outage_count
+                result_parts.append(f"✅ **Годин зі світлом: +{diff}**")
+                if removed_outages:
+                    result_parts.append(f"З'явилось світло: {', '.join(removed_outages)}")
+            else:
+                if added_outages:
+                    result_parts.append(f"⚡ Додалось відключення: {', '.join(added_outages)}")
+                if removed_outages:
+                    result_parts.append(f"✅ З'явилось світло: {', '.join(removed_outages)}")
+            
+            result = "\n".join(result_parts)
         
-        if removed_outages:
-            changes.append(f"✅ **З'явилось світло:** {', '.join(removed_outages)}")
+        log(f"✓ Результат порівняння: {result}")
+        log("🔍 === КІНЕЦЬ ПОРІВНЯННЯ ГРАФІКІВ ===")
         
-        return "\n".join(changes)
+        return result
 
     def crop_screenshot(self, screenshot_bytes, top_crop=300, bottom_crop=400, left_crop=0, right_crop=0):
         """Обрізає скріншот"""
@@ -1566,7 +1219,7 @@ class DTEKChecker:
             right = width - right_crop
             bottom = height - bottom_crop
             
-            print(f"Обрізаю скріншот: {width}x{height} -> {right-left}x{bottom-top}")
+            log(f"✂️ Обрізаю скріншот: {width}x{height} -> {right-left}x{bottom-top}")
             
             cropped = image.crop((left, top, right, bottom))
             
@@ -1574,13 +1227,48 @@ class DTEKChecker:
             cropped.save(output, format='PNG', optimize=True, quality=95)
             return output.getvalue()
         except Exception as e:
-            print(f"⚠ Помилка при обрізці скріншота: {e}")
+            log(f"⚠ Помилка при обрізці скріншота: {e}")
             return screenshot_bytes
 
+    async def _make_screenshot_with_retry(self, max_attempts=2):
+        """Робить скріншот з повторними спробами"""
+        for attempt in range(1, max_attempts + 1):
+            try:
+                log(f"📸 Спроба {attempt}/{max_attempts} зробити скріншот...")
+                screenshot = await asyncio.wait_for(
+                    self.page.screenshot(full_page=True, type='png'),
+                    timeout=60
+                )
+                log(f"✓ Скріншот отримано ({len(screenshot)} байт)")
+                return screenshot
+            except asyncio.TimeoutError:
+                log(f"⏱️ Таймаут на спробі {attempt}/{max_attempts}")
+                if attempt < max_attempts:
+                    log("🔄 Пробую ще раз через 3 секунди...")
+                    await asyncio.sleep(3)
+                    try:
+                        await self.page.reload(wait_until='domcontentloaded', timeout=30000)
+                        await asyncio.sleep(2)
+                        log("✓ Сторінка оновлена")
+                    except:
+                        log("⚠️ Не вдалося оновити сторінку")
+                else:
+                    log(f"❌ Всі {max_attempts} спроби вичерпано")
+                    raise
+            except Exception as e:
+                log(f"❌ Помилка при створенні скріншота: {e}")
+                if attempt < max_attempts:
+                    log("🔄 Пробую ще раз...")
+                    await asyncio.sleep(3)
+                else:
+                    raise
+        
+        raise Exception(f"Не вдалося зробити скріншот за {max_attempts} спроб")
+
     async def make_screenshots(self):
-        """Робить скріншоти з парсингом графіка - стабільна версія"""
+        """Робить скріншоти з парсингом графіка"""
         try:
-            # Закриваємо опрос перед початком
+            log("🔍 Перевіряю наявність опросу...")
             await self._close_survey_if_present()
             await asyncio.sleep(0.5)
             
@@ -1590,11 +1278,31 @@ class DTEKChecker:
             log("📊 ПАРСИНГ ГРАФІКА НА СЬОГОДНІ")
             log("="*50)
             
+            log("📋 Парсю графік на сьогодні...")
             schedule_today = await self.parse_schedule()
+            if schedule_today:
+                log(f"✓ Графік розпарсено: {len(schedule_today.get('schedule', {}))} годин")
+            else:
+                log("❌ Не вдалося розпарсити графік")
+            
+            log("🔍 Перевіряю що таблиця графіка видима...")
+            try:
+                table = self.page.locator('.active > table')
+                await table.wait_for(state='visible', timeout=10000)
+                log("✓ Таблиця графіка видима")
+            except Exception as e:
+                log(f"⚠️ Таблиця не знайдена: {e}")
+            
             log("📸 Роблю скріншот основного графіка...")
-            screenshot_main = await self.page.screenshot(full_page=True, type='png')
+            try:
+                screenshot_main = await self._make_screenshot_with_retry(max_attempts=2)
+            except Exception as e:
+                log(f"❌ Критична помилка при створенні скріншота: {e}")
+                raise
+            
+            log("✂️ Обрізаю скріншот...")
             screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
-            log("✓ Скріншот основного графіка готовий")
+            log(f"✓ Скріншот обрізано ({len(screenshot_main_cropped)} байт)")
             
             # ЗАВТРА
             log("")
@@ -1607,6 +1315,7 @@ class DTEKChecker:
             schedule_tomorrow = None
             
             try:
+                log("🔍 Шукаю другий графік...")
                 date_selector = self.page.locator('div.date:nth-child(2)')
                 await date_selector.wait_for(state='visible', timeout=15000)
                 
@@ -1614,20 +1323,34 @@ class DTEKChecker:
                 second_date = second_date.strip()
                 log(f"📅 Дата другого графіка: {second_date}")
                 
+                log("🖱️ Клікаю на другий графік...")
                 await date_selector.click()
-                log("✓ Клікнув на другий графік, чекаю завантаження...")
+                log("⏳ Чекаю завантаження (2 сек)...")
                 await asyncio.sleep(2)
                 
-                # Закриваємо опрос якщо з'явився
+                log("🔍 Перевіряю опрос після переключення...")
                 await self._close_survey_if_present()
                 
-                log("📸 Роблю скріншот другого графіка...")
+                log("📋 Парсю графік на завтра...")
                 schedule_tomorrow = await self.parse_schedule()
-                screenshot_tomorrow = await self.page.screenshot(full_page=True, type='png')
-                screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
-                log("✓ Скріншот другого графіка готовий")
+                if schedule_tomorrow:
+                    log(f"✓ Графік розпарсено: {len(schedule_tomorrow.get('schedule', {}))} годин")
                 
-                # Повертаємося назад
+                log("📸 Роблю скріншот другого графіка...")
+                try:
+                    screenshot_tomorrow = await self._make_screenshot_with_retry(max_attempts=2)
+                except asyncio.TimeoutError:
+                    log("❌ Таймаут при створенні скріншота завтра після всіх спроб")
+                    screenshot_tomorrow = None
+                except Exception as e:
+                    log(f"❌ Помилка скріншота завтра: {e}")
+                    screenshot_tomorrow = None
+                
+                if screenshot_tomorrow:
+                    log("✂️ Обрізаю скріншот...")
+                    screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
+                    log(f"✓ Скріншот обрізано ({len(screenshot_tomorrow_cropped)} байт)")
+                
                 log("🔙 Повертаюся на перший графік...")
                 first_date = self.page.locator('div.date:nth-child(1)')
                 await first_date.wait_for(state='visible', timeout=10000)
@@ -1639,6 +1362,11 @@ class DTEKChecker:
                 log(f"⚠ Таймаут при роботі зі другим графіком")
             except Exception as e:
                 log(f"⚠ Не вдалося отримати другий графік: {e}")
+            
+            log("")
+            log("="*50)
+            log("✅ СКРІНШОТИ ГОТОВІ")
+            log("="*50)
             
             return {
                 'screenshot_main': screenshot_main_cropped,
@@ -1652,6 +1380,8 @@ class DTEKChecker:
             
         except Exception as e:
             log(f"✖️ Помилка при створенні скріншотів: {e}")
+            import traceback
+            log(f"Stack trace: {traceback.format_exc()}")
             raise
 
     async def close_browser(self):
@@ -1673,34 +1403,44 @@ async def get_last_check():
         log("📂 Читаю останню перевірку з БД...")
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow(
-                'SELECT update_date, schedule_hash, schedule_data, created_at FROM dtek_checks ORDER BY created_at DESC LIMIT 1'
+                'SELECT update_date, schedule_hash, schedule_data, schedule_tomorrow_hash, schedule_tomorrow_data, created_at FROM dtek_checks ORDER BY created_at DESC LIMIT 1'
             )
             if row:
                 log(f"✓ Знайдено запис від {row['created_at']}")
                 
                 schedule_data = row['schedule_data']
-                log(f"🔍 Тип даних з БД: {type(schedule_data)}")
+                schedule_tomorrow_data = row['schedule_tomorrow_data']
                 
-                # Якщо дані прийшли як строка - парсимо JSON
+                log(f"🔍 Тип даних з БД: schedule_data={type(schedule_data)}, tomorrow={type(schedule_tomorrow_data)}")
+                
                 if isinstance(schedule_data, str):
                     log("⚠️ schedule_data є строкою, парсимо JSON...")
                     try:
                         schedule_data = json.loads(schedule_data)
-                        log(f"✓ JSON розпарсено, тип: {type(schedule_data)}")
+                        log(f"✓ JSON розпарсено")
                     except Exception as e:
                         log(f"❌ Помилка парсингу JSON: {e}")
                         return None
-                else:
-                    log(f"✓ schedule_data вже є dict/object")
+                
+                if schedule_tomorrow_data and isinstance(schedule_tomorrow_data, str):
+                    log("⚠️ schedule_tomorrow_data є строкою, парсимо JSON...")
+                    try:
+                        schedule_tomorrow_data = json.loads(schedule_tomorrow_data)
+                        log(f"✓ JSON розпарсено")
+                    except Exception as e:
+                        log(f"❌ Помилка парсингу JSON: {e}")
+                        schedule_tomorrow_data = None
                 
                 result = {
                     'update_date': row['update_date'],
                     'schedule_hash': row['schedule_hash'],
                     'schedule_data': schedule_data,
+                    'schedule_tomorrow_hash': row['schedule_tomorrow_hash'],
+                    'schedule_tomorrow_data': schedule_tomorrow_data,
                     'created_at': row['created_at']
                 }
                 
-                log(f"✓ Повертаю дані: update_date={result['update_date']}, hash={result['schedule_hash']}")
+                log(f"✓ Повертаю дані: update_date={result['update_date']}")
                 return result
             else:
                 log("ℹ️ Записів в БД не знайдено")
@@ -1711,17 +1451,31 @@ async def get_last_check():
         log(f"Stack trace: {traceback.format_exc()}")
     return None
 
-async def save_check(update_date, schedule_hash, schedule_data):
+async def save_check(update_date, schedule_hash, schedule_data, schedule_tomorrow_hash=None, schedule_tomorrow_data=None):
     """Зберігає дані перевірки в БД"""
     try:
+        log(f"💾 Зберігаю в БД:")
+        log(f"  📅 update_date: {update_date}")
+        log(f"  🔐 schedule_hash: {schedule_hash}")
+        log(f"  🔐 schedule_tomorrow_hash: {schedule_tomorrow_hash}")
+        log(f"  🔍 Тип schedule_data: {type(schedule_data)}")
+        
         async with db_pool.acquire() as conn:
+            schedule_json = json.dumps(schedule_data)
+            schedule_tomorrow_json = json.dumps(schedule_tomorrow_data) if schedule_tomorrow_data else None
+            log(f"  📦 Розмір JSON сьогодні: {len(schedule_json)} символів")
+            if schedule_tomorrow_json:
+                log(f"  📦 Розмір JSON завтра: {len(schedule_tomorrow_json)} символів")
+            
             await conn.execute(
-                'INSERT INTO dtek_checks (update_date, schedule_hash, schedule_data, created_at) VALUES ($1, $2, $3, $4)',
-                update_date, schedule_hash, json.dumps(schedule_data), datetime.now()
+                'INSERT INTO dtek_checks (update_date, schedule_hash, schedule_data, schedule_tomorrow_hash, schedule_tomorrow_data, created_at) VALUES ($1, $2, $3, $4, $5, $6)',
+                update_date, schedule_hash, schedule_json, schedule_tomorrow_hash, schedule_tomorrow_json, datetime.now()
             )
-        print(f"✓ Дані збережено в БД")
+        log(f"✓ Дані успішно збережено в БД")
     except Exception as e:
-        print(f"✖️ Помилка при збереженні в БД: {e}")
+        log(f"✖️ Помилка при збереженні в БД: {e}")
+        import traceback
+        log(f"Stack trace: {traceback.format_exc()}")
 
 @bot.event
 async def on_ready():
@@ -1785,79 +1539,167 @@ async def check_schedule():
         
         # Дата оновилась - робимо скріншоти і парсимо
         log("📸 Дата оновилась! Роблю скріншоти...")
-        result = await asyncio.wait_for(checker.make_screenshots(), timeout=180)
+        try:
+            result = await asyncio.wait_for(checker.make_screenshots(), timeout=240)
+            log("✅ Скріншоти успішно створено")
+        except asyncio.TimeoutError:
+            log("❌ Таймаут створення скріншотів (4 хвилини)")
+            raise
         
-        # Перевіряємо чи змінився графік
+        # Отримуємо останню перевірку з БД
         schedule_today = result.get('schedule_today')
+        schedule_tomorrow = result.get('schedule_tomorrow')
+        
+        log(f"🔍 Отримано графік на сьогодні: {type(schedule_today)}")
+        if schedule_tomorrow:
+            log(f"🔍 Отримано графік на завтра: {type(schedule_tomorrow)}")
+        
+        if not schedule_today:
+            log("❌ Не вдалося отримати графік на сьогодні")
+            return
+        
         current_hash = checker._calculate_schedule_hash(schedule_today)
+        current_tomorrow_hash = checker._calculate_schedule_hash(schedule_tomorrow) if schedule_tomorrow else None
+        
+        log(f"🔐 Хеш поточного графіка (сьогодні): {current_hash}")
+        if current_tomorrow_hash:
+            log(f"🔐 Хеш поточного графіка (завтра): {current_tomorrow_hash}")
         
         last_check = await get_last_check()
         
-        # Порівнюємо графіки
-        changes_text = None
-        if last_check and last_check['schedule_hash'] == current_hash:
-            log("⏸️ Графік не змінився (тільки дата оновилась)")
+        # Визначаємо які графіки змінились
+        today_changed = True
+        tomorrow_changed = True
+        
+        if last_check:
+            log(f"📂 Знайдено попередню перевірку з БД")
+            log(f"🔐 Хеш попереднього графіка (сьогодні): {last_check['schedule_hash']}")
+            log(f"🔐 Хеш попереднього графіка (завтра): {last_check.get('schedule_tomorrow_hash')}")
+            
+            # Перевіряємо чи змінився графік СЬОГОДНІ
+            if last_check['schedule_hash'] == current_hash:
+                log("⏸️ Графік СЬОГОДНІ не змінився")
+                today_changed = False
+            else:
+                log("🔔 Графік СЬОГОДНІ змінився!")
+                today_changed = True
+            
+            # Перевіряємо чи змінився графік ЗАВТРА
+            if current_tomorrow_hash and last_check.get('schedule_tomorrow_hash'):
+                if last_check['schedule_tomorrow_hash'] == current_tomorrow_hash:
+                    log("⏸️ Графік ЗАВТРА не змінився")
+                    tomorrow_changed = False
+                else:
+                    log("🔔 Графік ЗАВТРА змінився!")
+                    tomorrow_changed = True
+            elif not current_tomorrow_hash:
+                log("ℹ️ Графік ЗАВТРА відсутній")
+                tomorrow_changed = False
+        else:
+            log("📂 Попередня перевірка не знайдена (перший запуск)")
+        
+        # Якщо жоден графік не змінився - не відправляємо нічого
+        if not today_changed and not tomorrow_changed:
+            log("⏸️ Жоден з графіків не змінився - не відправляю повідомлення")
             log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
             log("="*50)
             log("")
             return
-        elif last_check and last_check.get('schedule_data'):
-            # Є попередній графік - порівнюємо
-            old_schedule = last_check['schedule_data']
-            changes_text = checker._compare_schedules(old_schedule, schedule_today)
         
-        # Графік змінився - відправляємо!
-        log("✅ Графік змінився - відправляю в Discord!")
-        
-        # Зберігаємо в БД
-        await save_check(result['update_date'], current_hash, schedule_today)
-        
-        # Відправляємо СЬОГОДНІ
-        embed = discord.Embed(
-            title="⚡ Графік відключень ДТЕК Київські регіональні електромережі",
-            description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
-            color=discord.Color.gold(),
-            timestamp=datetime.now()
-        )
-        
-        if result['update_date']:
-            embed.add_field(
-                name="📅 Дата оновлення на сайті",
-                value=f"`{result['update_date']}`",
-                inline=False
-            )
-        
-        # Додаємо опис змін якщо є
-        if changes_text:
-            embed.add_field(
-                name="📊 Що змінилось:",
-                value=changes_text,
-                inline=False
-            )
-        
-        embed.add_field(
-            name="✅ Статус",
-            value="**🔢 ГРАФІК ОНОВЛЕНО!**",
-            inline=False
-        )
-        embed.set_footer(text="Нова інформація • Автоматична перевірка")
+        # Зберігаємо в БД нові дані
+        await save_check(result['update_date'], current_hash, schedule_today, current_tomorrow_hash, schedule_tomorrow)
         
         timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
-        file_main = discord.File(
-            io.BytesIO(result['screenshot_main']), 
-            filename=f"dtek_today_{timestamp_str}.png"
-        )
         
-        await channel.send(embed=embed, file=file_main)
+        # Відправляємо СЬОГОДНІ якщо змінився
+        if today_changed:
+            log("📤 Відправляю графік СЬОГОДНІ...")
+            
+            # Порівнюємо з попереднім
+            changes_text = None
+            if last_check and last_check.get('schedule_data'):
+                log("🔄 Починаю порівняння графіків (СЬОГОДНІ)...")
+                old_schedule = last_check['schedule_data']
+                if isinstance(old_schedule, str):
+                    log("⚠️ schedule_data є строкою, конвертую...")
+                    try:
+                        old_schedule = json.loads(old_schedule)
+                    except Exception as e:
+                        log(f"❌ Помилка конвертації: {e}")
+                        old_schedule = None
+                
+                if old_schedule:
+                    try:
+                        changes_text = checker._compare_schedules(old_schedule, schedule_today)
+                        log(f"✓ Порівняння завершено")
+                    except Exception as e:
+                        log(f"❌ Помилка при порівнянні: {e}")
+                        import traceback
+                        log(f"Stack trace: {traceback.format_exc()}")
+                        changes_text = None
+            
+            embed = discord.Embed(
+                title="⚡ Графік відключень ДТЕК Київські регіональні електромережі",
+                description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
+                color=discord.Color.gold(),
+                timestamp=datetime.now()
+            )
+            
+            if result['update_date']:
+                embed.add_field(
+                    name="📅 Дата оновлення на сайті",
+                    value=f"`{result['update_date']}`",
+                    inline=False
+                )
+            
+            if changes_text:
+                embed.add_field(
+                    name="📊 Що змінилось:",
+                    value=changes_text,
+                    inline=False
+                )
+            
+            embed.add_field(
+                name="✅ Статус",
+                value="**🔢 ГРАФІК ОНОВЛЕНО!**",
+                inline=False
+            )
+            embed.set_footer(text="Нова інформація • Автоматична перевірка")
+            
+            file_main = discord.File(
+                io.BytesIO(result['screenshot_main']), 
+                filename=f"dtek_today_{timestamp_str}.png"
+            )
+            
+            await channel.send(embed=embed, file=file_main)
+            log("✓ Графік СЬОГОДНІ відправлено")
+        else:
+            log("⏸️ Графік СЬОГОДНІ не змінився - пропускаю")
         
-        # Перевіряємо ЗАВТРА
-        schedule_tomorrow = result.get('schedule_tomorrow')
-        if schedule_tomorrow and result.get('screenshot_tomorrow'):
-            # Перевіряємо чи є відключення
+        # Відправляємо ЗАВТРА якщо змінився І є відключення
+        if tomorrow_changed and schedule_tomorrow and result.get('screenshot_tomorrow'):
             has_outages = checker._has_any_outages(schedule_tomorrow)
             
             if has_outages:
-                print("✅ Завтра є відключення - відправляю графік")
+                log("📤 Відправляю графік ЗАВТРА...")
+                
+                # Порівнюємо з попереднім
+                changes_text_tomorrow = None
+                if last_check and last_check.get('schedule_tomorrow_data'):
+                    log("🔄 Починаю порівняння графіків (ЗАВТРА)...")
+                    old_schedule_tomorrow = last_check['schedule_tomorrow_data']
+                    if isinstance(old_schedule_tomorrow, str):
+                        try:
+                            old_schedule_tomorrow = json.loads(old_schedule_tomorrow)
+                        except:
+                            old_schedule_tomorrow = None
+                    
+                    if old_schedule_tomorrow:
+                        try:
+                            changes_text_tomorrow = checker._compare_schedules(old_schedule_tomorrow, schedule_tomorrow)
+                        except Exception as e:
+                            log(f"❌ Помилка порівняння (ЗАВТРА): {e}")
+                            changes_text_tomorrow = None
                 
                 embed_tomorrow = discord.Embed(
                     title="📅 Графік відключень на завтра",
@@ -1866,22 +1708,32 @@ async def check_schedule():
                     timestamp=datetime.now()
                 )
                 
+                if changes_text_tomorrow:
+                    embed_tomorrow.add_field(
+                        name="📊 Що змінилось:",
+                        value=changes_text_tomorrow,
+                        inline=False
+                    )
+                
                 file_tomorrow = discord.File(
                     io.BytesIO(result['screenshot_tomorrow']), 
                     filename=f"dtek_tomorrow_{timestamp_str}.png"
                 )
                 
                 await channel.send(embed=embed_tomorrow, file=file_tomorrow)
+                log("✓ Графік ЗАВТРА відправлено")
             else:
-                print("⏸️ Завтра немає відключень - не відправляю")
+                log("⏸️ Завтра немає відключень - не відправляю")
+        elif not tomorrow_changed:
+            log("⏸️ Графік ЗАВТРА не змінився - пропускаю")
         
-        log(f"✓ Повідомлення відправлено в Discord")
+        log(f"✓ Перевірка завершена")
         log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
         log("="*50)
         log("")
         
     except asyncio.TimeoutError:
-        log(f"⏱️ ТАЙМАУТ: Операція зайняла більше 3 хвилин")
+        log(f"⏱️ ТАЙМАУТ: Операція зайняла більше 4 хвилин")
         log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
         log("="*50)
         log("")
@@ -1889,7 +1741,7 @@ async def check_schedule():
             try:
                 error_embed = discord.Embed(
                     title="⏱️ Таймаут операції",
-                    description="Перевірка зайняла більше 3 хвилин. Можливо, сайт повільно завантажується.",
+                    description="Перевірка зайняла більше 4 хвилин. Можливо, сайт повільно завантажується або виникла проблема з мережею.",
                     color=discord.Color.dark_gray(),
                     timestamp=datetime.now()
                 )
@@ -1917,6 +1769,17 @@ async def before_check_schedule():
     """Чекаємо, поки бот буде готовий"""
     await bot.wait_until_ready()
     log("⏳ Очікування готовності бота завершено")
+    
+    if checker.browser and checker.page:
+        log("🔥 Прогрів сторінки перед першою перевіркою...")
+        try:
+            await checker.page.reload(wait_until='domcontentloaded', timeout=30000)
+            await asyncio.sleep(3)
+            await checker._close_survey_if_present()
+            log("✓ Сторінка прогріта")
+        except Exception as e:
+            log(f"⚠️ Не вдалося прогріти сторінку: {e}")
+    
     log("✓ Автоматичні перевірки почнуться через 5 хвилин")
     log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
 
@@ -1930,20 +1793,47 @@ async def manual_check(ctx):
     await ctx.send("⏳ Починаю перевірку графіка відключень...")
     
     try:
-        result = await asyncio.wait_for(checker.make_screenshots(), timeout=180)
+        log("🎮 [MANUAL] Ручна перевірка запущена")
+        result = await asyncio.wait_for(checker.make_screenshots(), timeout=240)
+        log("✅ [MANUAL] Скріншоти створено")
         
-        # Перевіряємо чи змінився графік
         schedule_today = result.get('schedule_today')
-        current_hash = checker._calculate_schedule_hash(schedule_today)
+        schedule_tomorrow = result.get('schedule_tomorrow')
         
-        # Отримуємо попередній графік для порівняння
+        log(f"🔍 [MANUAL] Отримано графік: {type(schedule_today)}")
+        current_hash = checker._calculate_schedule_hash(schedule_today)
+        current_tomorrow_hash = checker._calculate_schedule_hash(schedule_tomorrow) if schedule_tomorrow else None
+        
+        log(f"🔐 [MANUAL] Хеш поточного графіка: {current_hash}")
+        
         last_check = await get_last_check()
+        
+        # Порівнюємо СЬОГОДНІ
         changes_text = None
         if last_check and last_check.get('schedule_data'):
+            log("🔄 [MANUAL] Починаю порівняння графіків (СЬОГОДНІ)...")
             old_schedule = last_check['schedule_data']
-            changes_text = checker._compare_schedules(old_schedule, schedule_today)
+            if isinstance(old_schedule, str):
+                log("⚠️ [MANUAL] schedule_data є строкою, конвертую...")
+                try:
+                    old_schedule = json.loads(old_schedule)
+                except Exception as e:
+                    log(f"❌ [MANUAL] Помилка конвертації: {e}")
+                    old_schedule = None
+            
+            if old_schedule:
+                try:
+                    changes_text = checker._compare_schedules(old_schedule, schedule_today)
+                except Exception as e:
+                    log(f"❌ [MANUAL] Помилка порівняння: {e}")
+                    import traceback
+                    log(f"Stack trace: {traceback.format_exc()}")
+        else:
+            log("📊 [MANUAL] Немає попереднього графіка")
         
-        await save_check(result['update_date'], current_hash, schedule_today)
+        await save_check(result['update_date'], current_hash, schedule_today, current_tomorrow_hash, schedule_tomorrow)
+        
+        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
         
         # Відправляємо СЬОГОДНІ
         embed = discord.Embed(
@@ -1960,7 +1850,6 @@ async def manual_check(ctx):
                 inline=False
             )
         
-        # Додаємо опис змін якщо є
         if changes_text:
             embed.add_field(
                 name="📊 Що змінилось:",
@@ -1970,7 +1859,6 @@ async def manual_check(ctx):
         
         embed.set_footer(text="Ручна перевірка • Запущено командою !check")
         
-        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
         file_main = discord.File(
             io.BytesIO(result['screenshot_main']), 
             filename=f"dtek_manual_today_{timestamp_str}.png"
@@ -1978,18 +1866,40 @@ async def manual_check(ctx):
         
         await ctx.send(embed=embed, file=file_main)
         
-        # Перевіряємо ЗАВТРА
-        schedule_tomorrow = result.get('schedule_tomorrow')
+        # Відправляємо ЗАВТРА якщо є відключення
         if schedule_tomorrow and result.get('screenshot_tomorrow'):
             has_outages = checker._has_any_outages(schedule_tomorrow)
             
             if has_outages:
+                # Порівнюємо ЗАВТРА
+                changes_text_tomorrow = None
+                if last_check and last_check.get('schedule_tomorrow_data'):
+                    old_schedule_tomorrow = last_check['schedule_tomorrow_data']
+                    if isinstance(old_schedule_tomorrow, str):
+                        try:
+                            old_schedule_tomorrow = json.loads(old_schedule_tomorrow)
+                        except:
+                            old_schedule_tomorrow = None
+                    
+                    if old_schedule_tomorrow:
+                        try:
+                            changes_text_tomorrow = checker._compare_schedules(old_schedule_tomorrow, schedule_tomorrow)
+                        except:
+                            pass
+                
                 embed_tomorrow = discord.Embed(
                     title="📅 Графік відключень на завтра",
                     description=f"**📍 Адреса:** с. Книжичі, вул. Київська, 168\n**📆 Дата:** {result['second_date'] or 'Завтра'}",
                     color=discord.Color.blue(),
                     timestamp=datetime.now()
                 )
+                
+                if changes_text_tomorrow:
+                    embed_tomorrow.add_field(
+                        name="📊 Що змінилось:",
+                        value=changes_text_tomorrow,
+                        inline=False
+                    )
                 
                 file_tomorrow = discord.File(
                     io.BytesIO(result['screenshot_tomorrow']), 
@@ -1999,9 +1909,10 @@ async def manual_check(ctx):
                 await ctx.send(embed=embed_tomorrow, file=file_tomorrow)
         
     except asyncio.TimeoutError:
+        log("⏱️ [MANUAL] Таймаут 4 хвилини")
         error_embed = discord.Embed(
             title="⏱️ Таймаут",
-            description="Перевірка зайняла більше 3 хвилин.",
+            description="Перевірка зайняла більше 4 хвилин. Спробуйте пізніше.",
             color=discord.Color.dark_gray()
         )
         await ctx.send(embed=error_embed)
