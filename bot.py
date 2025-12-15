@@ -1670,19 +1670,45 @@ checker = DTEKChecker()
 async def get_last_check():
     """Отримує дані останньої перевірки з БД"""
     try:
+        log("📂 Читаю останню перевірку з БД...")
         async with db_pool.acquire() as conn:
             row = await conn.fetchrow(
                 'SELECT update_date, schedule_hash, schedule_data, created_at FROM dtek_checks ORDER BY created_at DESC LIMIT 1'
             )
             if row:
-                return {
+                log(f"✓ Знайдено запис від {row['created_at']}")
+                
+                schedule_data = row['schedule_data']
+                log(f"🔍 Тип даних з БД: {type(schedule_data)}")
+                
+                # Якщо дані прийшли як строка - парсимо JSON
+                if isinstance(schedule_data, str):
+                    log("⚠️ schedule_data є строкою, парсимо JSON...")
+                    try:
+                        schedule_data = json.loads(schedule_data)
+                        log(f"✓ JSON розпарсено, тип: {type(schedule_data)}")
+                    except Exception as e:
+                        log(f"❌ Помилка парсингу JSON: {e}")
+                        return None
+                else:
+                    log(f"✓ schedule_data вже є dict/object")
+                
+                result = {
                     'update_date': row['update_date'],
                     'schedule_hash': row['schedule_hash'],
-                    'schedule_data': row['schedule_data'],
+                    'schedule_data': schedule_data,
                     'created_at': row['created_at']
                 }
+                
+                log(f"✓ Повертаю дані: update_date={result['update_date']}, hash={result['schedule_hash']}")
+                return result
+            else:
+                log("ℹ️ Записів в БД не знайдено")
+                return None
     except Exception as e:
-        print(f"Помилка при отриманні даних з БД: {e}")
+        log(f"❌ Помилка при отриманні даних з БД: {e}")
+        import traceback
+        log(f"Stack trace: {traceback.format_exc()}")
     return None
 
 async def save_check(update_date, schedule_hash, schedule_data):
