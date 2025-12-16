@@ -58,17 +58,36 @@ async def init_db_pool():
         log("✓ Database pool створено")
         
         async with db_pool.acquire() as conn:
+            # Створюємо основну таблицю
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS dtek_checks (
                     id SERIAL PRIMARY KEY,
                     update_date TEXT,
                     schedule_hash TEXT,
                     schedule_data JSONB,
-                    schedule_tomorrow_hash TEXT,
-                    schedule_tomorrow_data JSONB,
                     created_at TIMESTAMP DEFAULT NOW()
                 )
             ''')
+            
+            # Додаємо нові колонки якщо їх немає (міграція)
+            try:
+                await conn.execute('''
+                    ALTER TABLE dtek_checks 
+                    ADD COLUMN IF NOT EXISTS schedule_tomorrow_hash TEXT
+                ''')
+                log("✓ Колонка schedule_tomorrow_hash додана/існує")
+            except Exception as e:
+                log(f"⚠️ Помилка додавання schedule_tomorrow_hash: {e}")
+            
+            try:
+                await conn.execute('''
+                    ALTER TABLE dtek_checks 
+                    ADD COLUMN IF NOT EXISTS schedule_tomorrow_data JSONB
+                ''')
+                log("✓ Колонка schedule_tomorrow_data додана/існує")
+            except Exception as e:
+                log(f"⚠️ Помилка додавання schedule_tomorrow_data: {e}")
+        
         log("✓ Таблиця БД готова")
 
 async def close_db_pool():
@@ -1438,16 +1457,40 @@ async def get_last_check():
     try:
         log("📂 Читаю останню перевірку з БД...")
         async with db_pool.acquire() as conn:
-            row = await conn.fetchrow(
-                'SELECT update_date, schedule_hash, schedule_data, schedule_tomorrow_hash, schedule_tomorrow_data, created_at FROM dtek_checks ORDER BY created_at DESC LIMIT 1'
-            )
+            # Спочатку перевіряємо які колонки існують
+            columns_check = await conn.fetch("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'dtek_checks'
+            """)
+            existing_columns = [row['column_name'] for row in columns_check]
+            log(f"🔍 Наявні колонки в БД: {existing_columns}")
+            
+            has_tomorrow_cols = 'schedule_tomorrow_hash' in existing_columns and 'schedule_tomorrow_data' in existing_columns
+            
+            # Формуємо запит залежно від наявності колонок
+            if has_tomorrow_cols:
+                query = '''
+                    SELECT update_date, schedule_hash, schedule_data, 
+                           schedule_tomorrow_hash, schedule_tomorrow_data, created_at 
+                    FROM dtek_checks 
+                    ORDER BY created_at DESC LIMIT 1
+                '''
+            else:
+                query = '''
+                    SELECT update_date, schedule_hash, schedule_data, created_at 
+                    FROM dtek_checks 
+                    ORDER BY created_at DESC LIMIT 1
+                '''
+                log("⚠️ Стара структура БД (без колонок для графіка завтра)")
+            
+            row = await conn.fetchrow(query)
+            
             if row:
                 log(f"✓ Знайдено запис від {row['created_at']}")
                 
                 schedule_data = row['schedule_data']
-                schedule_tomorrow_data = row['schedule_tomorrow_data']
-                
-                log(f"🔍 Тип даних з БД: schedule_data={type(schedule_data)}, tomorrow={type(schedule_tomorrow_data)}")
+                log(f"🔍 Тип даних з БД: schedule_data={type(schedule_data)}")
                 
                 if isinstance(schedule_data, str):
                     log("⚠️ schedule_data є строкою, парсимо JSON...")
@@ -1458,25 +1501,31 @@ async def get_last_check():
                         log(f"❌ Помилка парсингу JSON: {e}")
                         return None
                 
-                if schedule_tomorrow_data and isinstance(schedule_tomorrow_data, str):
-                    log("⚠️ schedule_tomorrow_data є строкою, парсимо JSON...")
-                    try:
-                        schedule_tomorrow_data = json.loads(schedule_tomorrow_data)
-                        log(f"✓ JSON розпарсено")
-                    except Exception as e:
-                        log(f"❌ Помилка парсингу JSON: {e}")
-                        schedule_tomorrow_data = None
-                
                 result = {
                     'update_date': row['update_date'],
                     'schedule_hash': row['schedule_hash'],
                     'schedule_data': schedule_data,
-                    'schedule_tomorrow_hash': row['schedule_tomorrow_hash'],
-                    'schedule_tomorrow_data': schedule_tomorrow_data,
+                    'schedule_tomorrow_hash': None,
+                    'schedule_tomorrow_data': None,
                     'created_at': row['created_at']
                 }
                 
-                log(f"✓ Повертаю дані: update_date={result['update_date']}")
+                # Додаємо дані завтра якщо вони є
+                if has_tomorrow_cols and row.get('schedule_tomorrow_data'):
+                    schedule_tomorrow_data = row['schedule_tomorrow_data']
+                    if isinstance(schedule_tomorrow_data, str):
+                        log("⚠️ schedule_tomorrow_data є строкою, парсимо JSON...")
+                        try:
+                            schedule_tomorrow_data = json.loads(schedule_tomorrow_data)
+                            log(f"✓ JSON розпарсено")
+                        except Exception as e:
+                            log(f"❌ Помилка парсингу JSON: {e}")
+                            schedule_tomorrow_data = None
+                    
+                    result['schedule_tomorrow_hash'] = row.get('schedule_tomorrow_hash')
+                    result['schedule_tomorrow_data'] = schedule_tomorrow_data
+                
+                log(f"✓ Повертаю дані: update_date={result['update_date']}, has_tomorrow={result['schedule_tomorrow_hash'] is not None}")
                 return result
             else:
                 log("ℹ️ Записів в БД не знайдено")
@@ -1497,17 +1546,40 @@ async def save_check(update_date, schedule_hash, schedule_data, schedule_tomorro
         log(f"  🔍 Тип schedule_data: {type(schedule_data)}")
         
         async with db_pool.acquire() as conn:
-            schedule_json = json.dumps(schedule_data)
-            schedule_tomorrow_json = json.dumps(schedule_tomorrow_data) if schedule_tomorrow_data else None
-            log(f"  📦 Розмір JSON сьогодні: {len(schedule_json)} символів")
-            if schedule_tomorrow_json:
-                log(f"  📦 Розмір JSON завтра: {len(schedule_tomorrow_json)} символів")
+            # Перевіряємо які колонки існують
+            columns_check = await conn.fetch("""
+                SELECT column_name 
+                FROM information_schema.columns 
+                WHERE table_name = 'dtek_checks'
+            """)
+            existing_columns = [row['column_name'] for row in columns_check]
+            has_tomorrow_cols = 'schedule_tomorrow_hash' in existing_columns and 'schedule_tomorrow_data' in existing_columns
             
-            await conn.execute(
-                'INSERT INTO dtek_checks (update_date, schedule_hash, schedule_data, schedule_tomorrow_hash, schedule_tomorrow_data, created_at) VALUES ($1, $2, $3, $4, $5, $6)',
-                update_date, schedule_hash, schedule_json, schedule_tomorrow_hash, schedule_tomorrow_json, datetime.now(UKRAINE_TZ)
-            )
-        log(f"✓ Дані успішно збережено в БД")
+            schedule_json = json.dumps(schedule_data)
+            log(f"  📦 Розмір JSON сьогодні: {len(schedule_json)} символів")
+            
+            if has_tomorrow_cols and schedule_tomorrow_data:
+                # Нова структура БД - зберігаємо все
+                schedule_tomorrow_json = json.dumps(schedule_tomorrow_data)
+                log(f"  📦 Розмір JSON завтра: {len(schedule_tomorrow_json)} символів")
+                
+                await conn.execute(
+                    '''INSERT INTO dtek_checks 
+                       (update_date, schedule_hash, schedule_data, schedule_tomorrow_hash, schedule_tomorrow_data, created_at) 
+                       VALUES ($1, $2, $3, $4, $5, $6)''',
+                    update_date, schedule_hash, schedule_json, schedule_tomorrow_hash, schedule_tomorrow_json, datetime.now(UKRAINE_TZ)
+                )
+                log(f"✓ Дані успішно збережено в БД (з графіком завтра)")
+            else:
+                # Стара структура БД - зберігаємо тільки сьогодні
+                await conn.execute(
+                    '''INSERT INTO dtek_checks 
+                       (update_date, schedule_hash, schedule_data, created_at) 
+                       VALUES ($1, $2, $3, $4)''',
+                    update_date, schedule_hash, schedule_json, datetime.now(UKRAINE_TZ)
+                )
+                log(f"✓ Дані успішно збережено в БД (без графіка завтра - стара структура)")
+                
     except Exception as e:
         log(f"✖️ Помилка при збереженні в БД: {e}")
         import traceback
@@ -1616,7 +1688,8 @@ async def check_schedule():
         if last_check:
             log(f"📂 Знайдено попередню перевірку з БД")
             log(f"🔐 Хеш попереднього графіка (сьогодні): {last_check['schedule_hash']}")
-            log(f"🔐 Хеш попереднього графіка (завтра): {last_check.get('schedule_tomorrow_hash')}")
+            if last_check.get('schedule_tomorrow_hash'):
+                log(f"🔐 Хеш попереднього графіка (завтра): {last_check.get('schedule_tomorrow_hash')}")
             
             # Перевіряємо чи змінився графік СЬОГОДНІ
             if last_check['schedule_hash'] == current_hash:
@@ -1627,18 +1700,26 @@ async def check_schedule():
                 today_changed = True
             
             # Перевіряємо чи змінився графік ЗАВТРА
-            if current_tomorrow_hash and last_check.get('schedule_tomorrow_hash'):
-                if last_check['schedule_tomorrow_hash'] == current_tomorrow_hash:
-                    log("⏸️ Графік ЗАВТРА не змінився")
-                    tomorrow_changed = False
+            if current_tomorrow_hash:
+                if last_check.get('schedule_tomorrow_hash'):
+                    if last_check['schedule_tomorrow_hash'] == current_tomorrow_hash:
+                        log("⏸️ Графік ЗАВТРА не змінився")
+                        tomorrow_changed = False
+                    else:
+                        log("🔔 Графік ЗАВТРА змінився!")
+                        tomorrow_changed = True
                 else:
-                    log("🔔 Графік ЗАВТРА змінився!")
+                    # Попереднього графіка завтра немає - вважаємо що змінився
+                    log("ℹ️ Попереднього графіка ЗАВТРА немає в БД - вважаємо що змінився")
                     tomorrow_changed = True
-            elif not current_tomorrow_hash:
+            else:
                 log("ℹ️ Графік ЗАВТРА відсутній")
                 tomorrow_changed = False
         else:
             log("📂 Попередня перевірка не знайдена (перший запуск)")
+            # При першому запуску відправляємо обидва
+            today_changed = True
+            tomorrow_changed = True if current_tomorrow_hash else False
         
         # Якщо жоден графік не змінився - не відправляємо нічого
         if not today_changed and not tomorrow_changed:
