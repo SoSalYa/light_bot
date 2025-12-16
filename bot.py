@@ -1410,14 +1410,25 @@ class DTEKChecker:
         """Повний перезапуск браузера"""
         log("🔄 Починаю перезапуск браузера...")
         try:
+            # Зберігаємо останню дату перед закриттям
+            old_date = self.last_update_date
+            
             await self._save_cookies()
             await self.close_browser()
             await asyncio.sleep(3)
+            
+            # Ініціалізуємо заново - це включає заповнення форми
             await self.init_browser()
+            
             log("✅ Браузер успішно перезапущено!")
+            log(f"📅 Дата до перезапуску: {old_date}")
+            log(f"📅 Дата після перезапуску: {self.last_update_date}")
+            
             return True
         except Exception as e:
             log(f"❌ Помилка при перезапуску браузера: {e}")
+            import traceback
+            log(f"Stack trace: {traceback.format_exc()}")
             return False
 
 checker = DTEKChecker()
