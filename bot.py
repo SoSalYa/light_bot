@@ -14,12 +14,16 @@ import base64
 import hashlib
 import sys
 from collections import deque
+import pytz
 
 # Конфігурація
 DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
 CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID'))
 DATABASE_URL = os.getenv('DATABASE_URL')
 PORT = int(os.getenv('PORT', 10000))
+
+# Часовий пояс України (UTC+2/+3)
+UKRAINE_TZ = pytz.timezone('Europe/Kiev')
 
 # Database pool
 db_pool = None
@@ -29,7 +33,8 @@ log_buffer = deque(maxlen=500)
 
 def log(message):
     """Логування з виводом в консоль і збереженням для веб-інтерфейсу"""
-    timestamp = datetime.now().strftime('%H:%M:%S')
+    now = datetime.now(UKRAINE_TZ)
+    timestamp = now.strftime('%H:%M:%S')
     log_entry = f"[{timestamp}] {message}"
     print(log_entry)
     log_buffer.append(log_entry)
@@ -599,7 +604,7 @@ async def handle_screenshot(request):
         
         return web.json_response({
             'screenshot': screenshot_base64,
-            'timestamp': datetime.now().isoformat()
+            'timestamp': datetime.now(UKRAINE_TZ).isoformat()
         })
     except Exception as e:
         return web.json_response({'error': str(e)}, status=500)
@@ -672,7 +677,7 @@ async def handle_logs(request):
     """API: Отримати останні логи"""
     return web.json_response({
         'logs': list(log_buffer),
-        'timestamp': datetime.now().isoformat()
+        'timestamp': datetime.now(UKRAINE_TZ).isoformat()
     })
 
 async def handle_status(request):
@@ -1375,7 +1380,7 @@ class DTEKChecker:
                 'second_date': second_date,
                 'schedule_today': schedule_today,
                 'schedule_tomorrow': schedule_tomorrow,
-                'timestamp': datetime.now().isoformat()
+                'timestamp': datetime.now(UKRAINE_TZ).isoformat()
             }
             
         except Exception as e:
@@ -1394,6 +1399,26 @@ class DTEKChecker:
             await self.browser.close()
         if self.playwright:
             await self.playwright.stop()
+        
+        self.page = None
+        self.context = None
+        self.browser = None
+        self.playwright = None
+        log("✓ Браузер закрито")
+    
+    async def restart_browser(self):
+        """Повний перезапуск браузера"""
+        log("🔄 Починаю перезапуск браузера...")
+        try:
+            await self._save_cookies()
+            await self.close_browser()
+            await asyncio.sleep(3)
+            await self.init_browser()
+            log("✅ Браузер успішно перезапущено!")
+            return True
+        except Exception as e:
+            log(f"❌ Помилка при перезапуску браузера: {e}")
+            return False
 
 checker = DTEKChecker()
 
@@ -1469,7 +1494,7 @@ async def save_check(update_date, schedule_hash, schedule_data, schedule_tomorro
             
             await conn.execute(
                 'INSERT INTO dtek_checks (update_date, schedule_hash, schedule_data, schedule_tomorrow_hash, schedule_tomorrow_data, created_at) VALUES ($1, $2, $3, $4, $5, $6)',
-                update_date, schedule_hash, schedule_json, schedule_tomorrow_hash, schedule_tomorrow_json, datetime.now()
+                update_date, schedule_hash, schedule_json, schedule_tomorrow_hash, schedule_tomorrow_json, datetime.now(UKRAINE_TZ)
             )
         log(f"✓ Дані успішно збережено в БД")
     except Exception as e:
@@ -1484,6 +1509,7 @@ async def on_ready():
     log(f'✓ Інтервал перевірки: кожні 5 хвилин')
     log(f'🌐 Веб-інтерфейс запущено на порту {PORT}')
     log(f'🥷 STEALTH MODE активовано')
+    log(f'🕐 Часовий пояс: Europe/Kiev (UTC+2/+3)')
     
     await init_db_pool()
     await start_web_server()
@@ -1497,10 +1523,14 @@ async def on_ready():
     log("")
     
     log("🎉 Бот готовий до роботи!")
-    log(f"⏰ Поточний час: {datetime.now().strftime('%H:%M:%S')}")
+    now = datetime.now(UKRAINE_TZ)
+    log(f"⏰ Поточний час: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
     
     check_schedule.start()
     log("✓ Автоматична перевірка запущена (кожні 5 хвилин)")
+    
+    restart_browser_task.start()
+    log("✓ Автоматичний перезапуск браузера запущено (щодня о 23:58)")
     log("")
 
 @tasks.loop(minutes=5)
@@ -1532,7 +1562,8 @@ async def check_schedule():
         
         if not has_update:
             log(f"ℹ️ Без змін (дата не оновилась)")
-            log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
+            next_check = datetime.now(UKRAINE_TZ) + timedelta(minutes=5)
+            log(f"⏰ Наступна перевірка о: {next_check.strftime('%H:%M:%S')}")
             log("="*50)
             log("")
             return
@@ -1601,7 +1632,8 @@ async def check_schedule():
         # Якщо жоден графік не змінився - не відправляємо нічого
         if not today_changed and not tomorrow_changed:
             log("⏸️ Жоден з графіків не змінився - не відправляю повідомлення")
-            log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
+            next_check = datetime.now(UKRAINE_TZ) + timedelta(minutes=5)
+            log(f"⏰ Наступна перевірка о: {next_check.strftime('%H:%M:%S')}")
             log("="*50)
             log("")
             return
@@ -1609,7 +1641,8 @@ async def check_schedule():
         # Зберігаємо в БД нові дані
         await save_check(result['update_date'], current_hash, schedule_today, current_tomorrow_hash, schedule_tomorrow)
         
-        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp_now = datetime.now(UKRAINE_TZ)
+        timestamp_str = timestamp_now.strftime('%Y%m%d_%H%M%S')
         
         # Відправляємо СЬОГОДНІ якщо змінився
         if today_changed:
@@ -1642,7 +1675,7 @@ async def check_schedule():
                 title="⚡ Графік відключень ДТЕК Київські регіональні електромережі",
                 description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
                 color=discord.Color.gold(),
-                timestamp=datetime.now()
+                timestamp=timestamp_now
             )
             
             if result['update_date']:
@@ -1705,7 +1738,7 @@ async def check_schedule():
                     title="📅 Графік відключень на завтра",
                     description=f"**📍 Адреса:** с. Книжичі, вул. Київська, 168\n**📆 Дата:** {result['second_date'] or 'Завтра'}",
                     color=discord.Color.blue(),
-                    timestamp=datetime.now()
+                    timestamp=timestamp_now
                 )
                 
                 if changes_text_tomorrow:
@@ -1728,13 +1761,15 @@ async def check_schedule():
             log("⏸️ Графік ЗАВТРА не змінився - пропускаю")
         
         log(f"✓ Перевірка завершена")
-        log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
+        next_check = datetime.now(UKRAINE_TZ) + timedelta(minutes=5)
+        log(f"⏰ Наступна перевірка о: {next_check.strftime('%H:%M:%S')}")
         log("="*50)
         log("")
         
     except asyncio.TimeoutError:
         log(f"⏱️ ТАЙМАУТ: Операція зайняла більше 4 хвилин")
-        log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
+        next_check = datetime.now(UKRAINE_TZ) + timedelta(minutes=5)
+        log(f"⏰ Наступна перевірка о: {next_check.strftime('%H:%M:%S')}")
         log("="*50)
         log("")
         if channel:
@@ -1743,14 +1778,15 @@ async def check_schedule():
                     title="⏱️ Таймаут операції",
                     description="Перевірка зайняла більше 4 хвилин. Можливо, сайт повільно завантажується або виникла проблема з мережею.",
                     color=discord.Color.dark_gray(),
-                    timestamp=datetime.now()
+                    timestamp=datetime.now(UKRAINE_TZ)
                 )
                 await channel.send(embed=error_embed)
             except:
                 pass
     except Exception as e:
         log(f"✖️ Помилка в check_schedule: {e}")
-        log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
+        next_check = datetime.now(UKRAINE_TZ) + timedelta(minutes=5)
+        log(f"⏰ Наступна перевірка о: {next_check.strftime('%H:%M:%S')}")
         
         if channel:
             try:
@@ -1758,7 +1794,7 @@ async def check_schedule():
                     title="⚠️ Помилка перевірки",
                     description=f"Не вдалося виконати перевірку.\n```{str(e)[:200]}```",
                     color=discord.Color.dark_gray(),
-                    timestamp=datetime.now()
+                    timestamp=datetime.now(UKRAINE_TZ)
                 )
                 await channel.send(embed=error_embed)
             except:
@@ -1781,7 +1817,82 @@ async def before_check_schedule():
             log(f"⚠️ Не вдалося прогріти сторінку: {e}")
     
     log("✓ Автоматичні перевірки почнуться через 5 хвилин")
-    log(f"⏰ Наступна перевірка о: {(datetime.now() + timedelta(minutes=5)).strftime('%H:%M:%S')}")
+    next_check = datetime.now(UKRAINE_TZ) + timedelta(minutes=5)
+    log(f"⏰ Наступна перевірка о: {next_check.strftime('%H:%M:%S')}")
+
+@tasks.loop(minutes=1)
+async def restart_browser_task():
+    """Перевіряє чи потрібно перезапустити браузер о 23:58"""
+    try:
+        now = datetime.now(UKRAINE_TZ)
+        current_time = now.strftime('%H:%M')
+        
+        # Перезапуск о 23:58
+        if current_time == '23:58':
+            log("")
+            log("="*60)
+            log("🔄 ЧАС ДЛЯ ПЕРЕЗАПУСКУ БРАУЗЕРА (23:58)")
+            log("="*60)
+            
+            if checker.browser and checker.page:
+                channel = bot.get_channel(CHANNEL_ID)
+                if channel:
+                    try:
+                        info_embed = discord.Embed(
+                            title="🔄 Технічне обслуговування",
+                            description="Перезапускаю браузер для оновлення дати на сайті.\nПовернусь через хвилину!",
+                            color=discord.Color.blue(),
+                            timestamp=datetime.now(UKRAINE_TZ)
+                        )
+                        await channel.send(embed=info_embed)
+                    except:
+                        pass
+                
+                success = await checker.restart_browser()
+                
+                if success:
+                    log("✅ Браузер перезапущено успішно!")
+                    if channel:
+                        try:
+                            success_embed = discord.Embed(
+                                title="✅ Обслуговування завершено",
+                                description="Браузер перезапущено. Продовжую моніторинг!",
+                                color=discord.Color.green(),
+                                timestamp=datetime.now(UKRAINE_TZ)
+                            )
+                            await channel.send(embed=success_embed)
+                        except:
+                            pass
+                else:
+                    log("❌ Не вдалося перезапустити браузер!")
+                    if channel:
+                        try:
+                            error_embed = discord.Embed(
+                                title="⚠️ Помилка перезапуску",
+                                description="Не вдалося перезапустити браузер. Потрібна ручна ініціалізація через веб-інтерфейс.",
+                                color=discord.Color.red(),
+                                timestamp=datetime.now(UKRAINE_TZ)
+                            )
+                            await channel.send(embed=error_embed)
+                        except:
+                            pass
+                
+                log("="*60)
+                log("")
+                
+                # Чекаємо 2 хвилини щоб не запускати знову
+                await asyncio.sleep(120)
+            else:
+                log("⏸️ Браузер не запущено - пропускаю перезапуск")
+                
+    except Exception as e:
+        log(f"❌ Помилка в restart_browser_task: {e}")
+
+@restart_browser_task.before_loop
+async def before_restart_browser_task():
+    """Чекаємо готовності бота"""
+    await bot.wait_until_ready()
+    log("✓ Задача перезапуску браузера готова")
 
 @bot.command(name='check')
 async def manual_check(ctx):
@@ -1833,14 +1944,15 @@ async def manual_check(ctx):
         
         await save_check(result['update_date'], current_hash, schedule_today, current_tomorrow_hash, schedule_tomorrow)
         
-        timestamp_str = datetime.now().strftime('%Y%m%d_%H%M%S')
+        timestamp_now = datetime.now(UKRAINE_TZ)
+        timestamp_str = timestamp_now.strftime('%Y%m%d_%H%M%S')
         
         # Відправляємо СЬОГОДНІ
         embed = discord.Embed(
             title="⚡ Графік відключень ДТЕК (Ручна перевірка)",
             description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
             color=discord.Color.green(),
-            timestamp=datetime.now()
+            timestamp=timestamp_now
         )
         
         if result['update_date']:
@@ -1891,7 +2003,7 @@ async def manual_check(ctx):
                     title="📅 Графік відключень на завтра",
                     description=f"**📍 Адреса:** с. Книжичі, вул. Київська, 168\n**📆 Дата:** {result['second_date'] or 'Завтра'}",
                     color=discord.Color.blue(),
-                    timestamp=datetime.now()
+                    timestamp=timestamp_now
                 )
                 
                 if changes_text_tomorrow:
@@ -1973,8 +2085,14 @@ async def bot_info(ctx):
     )
     
     embed.add_field(
+        name="🔄 Автоматичний перезапуск",
+        value="Щодня о 23:58 (для оновлення дати)",
+        inline=False
+    )
+    
+    embed.add_field(
         name="📋 Команди",
-        value="`!check` - Ручна перевірка\n`!info` - Інформація\n`!status` - Детальний статус\n`!stop` - Зупинити (адміни)",
+        value="`!check` - Ручна перевірка\n`!restart` - Перезапуск браузера\n`!info` - Інформація\n`!status` - Детальний статус\n`!stop` - Зупинити (адміни)",
         inline=False
     )
     
@@ -1983,10 +2101,11 @@ async def bot_info(ctx):
 @bot.command(name='status')
 async def bot_status(ctx):
     """Детальний статус бота"""
+    now = datetime.now(UKRAINE_TZ)
     embed = discord.Embed(
         title="📊 Детальний статус бота",
         color=discord.Color.purple(),
-        timestamp=datetime.now()
+        timestamp=now
     )
     
     playwright_status = "✅ Запущено" if checker.playwright else "✖️ Не запущено"
@@ -2014,6 +2133,7 @@ async def stop_bot(ctx):
     """Остановка бота"""
     await ctx.send("🛑 Зупиняю бота...")
     check_schedule.cancel()
+    restart_browser_task.cancel()
     try:
         await checker._save_cookies()
         await checker.close_browser()
@@ -2022,13 +2142,31 @@ async def stop_bot(ctx):
     await close_db_pool()
     await bot.close()
 
+@bot.command(name='restart')
+async def restart_browser_command(ctx):
+    """Ручний перезапуск браузера"""
+    if not checker.browser or not checker.page:
+        await ctx.send("✖️ Браузер не запущено. Спочатку ініціалізуйте через веб-інтерфейс.")
+        return
+    
+    await ctx.send("🔄 Перезапускаю браузер...")
+    log("🎮 [MANUAL] Ручний перезапуск браузера")
+    
+    success = await checker.restart_browser()
+    
+    if success:
+        await ctx.send("✅ Браузер успішно перезапущено!")
+    else:
+        await ctx.send("❌ Помилка при перезапуску браузера. Перевірте логи.")
+
 if __name__ == '__main__':
     try:
         log("")
         log("="*60)
         log("🤖 ЗАПУСК DISCORD БОТА DTEK")
         log("="*60)
-        log(f"📅 Дата і час запуску: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        now = datetime.now(UKRAINE_TZ)
+        log(f"📅 Дата і час запуску: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
         log(f"🌐 Порт веб-інтерфейсу: {PORT}")
         log(f"📢 Discord канал: {CHANNEL_ID}")
         log(f"💾 База даних: {'✓ Налаштована' if DATABASE_URL else '✗ Не налаштована'}")
@@ -2052,5 +2190,6 @@ if __name__ == '__main__':
         except:
             pass
         log("✓ Бот зупинено")
-        log(f"📅 Час зупинки: {datetime.now().strftime('%Y-%m-%d %H:%M:%S')}")
+        now = datetime.now(UKRAINE_TZ)
+        log(f"📅 Час зупинки: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
         log("")
