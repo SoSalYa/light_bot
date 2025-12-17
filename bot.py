@@ -1558,6 +1558,9 @@ async def save_check(update_date, schedule_hash, schedule_data, schedule_tomorro
             schedule_json = json.dumps(schedule_data)
             log(f"  📦 Розмір JSON сьогодні: {len(schedule_json)} символів")
             
+            # Використовуємо UTC datetime без timezone (naive) для сумісності з PostgreSQL
+            now_utc = datetime.now(UKRAINE_TZ).astimezone(pytz.UTC).replace(tzinfo=None)
+            
             if has_tomorrow_cols and schedule_tomorrow_data:
                 # Нова структура БД - зберігаємо все
                 schedule_tomorrow_json = json.dumps(schedule_tomorrow_data)
@@ -1567,7 +1570,7 @@ async def save_check(update_date, schedule_hash, schedule_data, schedule_tomorro
                     '''INSERT INTO dtek_checks 
                        (update_date, schedule_hash, schedule_data, schedule_tomorrow_hash, schedule_tomorrow_data, created_at) 
                        VALUES ($1, $2, $3, $4, $5, $6)''',
-                    update_date, schedule_hash, schedule_json, schedule_tomorrow_hash, schedule_tomorrow_json, datetime.now(UKRAINE_TZ)
+                    update_date, schedule_hash, schedule_json, schedule_tomorrow_hash, schedule_tomorrow_json, now_utc
                 )
                 log(f"✓ Дані успішно збережено в БД (з графіком завтра)")
             else:
@@ -1576,7 +1579,7 @@ async def save_check(update_date, schedule_hash, schedule_data, schedule_tomorro
                     '''INSERT INTO dtek_checks 
                        (update_date, schedule_hash, schedule_data, created_at) 
                        VALUES ($1, $2, $3, $4)''',
-                    update_date, schedule_hash, schedule_json, datetime.now(UKRAINE_TZ)
+                    update_date, schedule_hash, schedule_json, now_utc
                 )
                 log(f"✓ Дані успішно збережено в БД (без графіка завтра - стара структура)")
                 
@@ -1733,8 +1736,9 @@ async def check_schedule():
         # Зберігаємо в БД нові дані
         await save_check(result['update_date'], current_hash, schedule_today, current_tomorrow_hash, schedule_tomorrow)
         
-        timestamp_now = datetime.now(UKRAINE_TZ)
-        timestamp_str = timestamp_now.strftime('%Y%m%d_%H%M%S')
+        # Для Discord embeds використовуємо naive UTC datetime
+        timestamp_now = datetime.now(UKRAINE_TZ).astimezone(pytz.UTC).replace(tzinfo=None)
+        timestamp_str = datetime.now(UKRAINE_TZ).strftime('%Y%m%d_%H%M%S')
         
         # Відправляємо СЬОГОДНІ якщо змінився
         if today_changed:
@@ -1870,7 +1874,7 @@ async def check_schedule():
                     title="⏱️ Таймаут операції",
                     description="Перевірка зайняла більше 4 хвилин. Можливо, сайт повільно завантажується або виникла проблема з мережею.",
                     color=discord.Color.dark_gray(),
-                    timestamp=datetime.now(UKRAINE_TZ)
+                    timestamp=datetime.utcnow()
                 )
                 await channel.send(embed=error_embed)
             except:
@@ -1886,7 +1890,7 @@ async def check_schedule():
                     title="⚠️ Помилка перевірки",
                     description=f"Не вдалося виконати перевірку.\n```{str(e)[:200]}```",
                     color=discord.Color.dark_gray(),
-                    timestamp=datetime.now(UKRAINE_TZ)
+                    timestamp=datetime.utcnow()
                 )
                 await channel.send(embed=error_embed)
             except:
@@ -1934,7 +1938,7 @@ async def restart_browser_task():
                             title="🔄 Технічне обслуговування",
                             description="Перезапускаю браузер для оновлення дати на сайті.\nПовернусь через хвилину!",
                             color=discord.Color.blue(),
-                            timestamp=datetime.now(UKRAINE_TZ)
+                            timestamp=datetime.utcnow()
                         )
                         await channel.send(embed=info_embed)
                     except:
@@ -1950,7 +1954,7 @@ async def restart_browser_task():
                                 title="✅ Обслуговування завершено",
                                 description="Браузер перезапущено. Продовжую моніторинг!",
                                 color=discord.Color.green(),
-                                timestamp=datetime.now(UKRAINE_TZ)
+                                timestamp=datetime.utcnow()
                             )
                             await channel.send(embed=success_embed)
                         except:
@@ -1963,7 +1967,7 @@ async def restart_browser_task():
                                 title="⚠️ Помилка перезапуску",
                                 description="Не вдалося перезапустити браузер. Потрібна ручна ініціалізація через веб-інтерфейс.",
                                 color=discord.Color.red(),
-                                timestamp=datetime.now(UKRAINE_TZ)
+                                timestamp=datetime.utcnow()
                             )
                             await channel.send(embed=error_embed)
                         except:
@@ -2036,8 +2040,9 @@ async def manual_check(ctx):
         
         await save_check(result['update_date'], current_hash, schedule_today, current_tomorrow_hash, schedule_tomorrow)
         
-        timestamp_now = datetime.now(UKRAINE_TZ)
-        timestamp_str = timestamp_now.strftime('%Y%m%d_%H%M%S')
+        # Для Discord embeds використовуємо naive UTC datetime
+        timestamp_now = datetime.now(UKRAINE_TZ).astimezone(pytz.UTC).replace(tzinfo=None)
+        timestamp_str = datetime.now(UKRAINE_TZ).strftime('%Y%m%d_%H%M%S')
         
         # Відправляємо СЬОГОДНІ
         embed = discord.Embed(
@@ -2193,11 +2198,10 @@ async def bot_info(ctx):
 @bot.command(name='status')
 async def bot_status(ctx):
     """Детальний статус бота"""
-    now = datetime.now(UKRAINE_TZ)
     embed = discord.Embed(
         title="📊 Детальний статус бота",
         color=discord.Color.purple(),
-        timestamp=now
+        timestamp=datetime.utcnow()
     )
     
     playwright_status = "✅ Запущено" if checker.playwright else "✖️ Не запущено"
