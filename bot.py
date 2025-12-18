@@ -1311,7 +1311,7 @@ class DTEKChecker:
             bottom = height - bottom_crop
             
             log(f"✂️ Обрізаю скріншот: {width}x{height} -> {right-left}x{bottom-top}")
-            log(f"   Параметри: top={top_crop}, bottom={bottom_crop}, left={left_crop}, right={right_crop}")
+            log(f"   Координати: left={left}, top={top}, right={right}, bottom={bottom}")
             
             cropped = image.crop((left, top, right, bottom))
             
@@ -1392,12 +1392,12 @@ class DTEKChecker:
                 log(f"❌ Критична помилка при створенні скріншота: {e}")
                 raise
             
-            # Обрізаємо по оранжевій рамці:
-            # top_crop=750 - обрізаємо форму + жовтий блок зверху
-            # bottom_crop=1050 - обрізаємо жовті кнопки знизу
-            # left_crop=650 - обрізаємо зліва
-            # right_crop=120 - трохи обрізаємо справа
-            screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=750, bottom_crop=1050, left_crop=650, right_crop=120)
+            # Обрізаємо за точними координатами:
+            # top_crop=300 - як було спочатку (зверху)
+            # left_crop=775 - зліва x=775
+            # right на x=1605, width=1920, тому right_crop=1920-1605=315
+            # bottom на y=1015, height=2594, тому bottom_crop=2594-1015=1579
+            screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=1579, left_crop=775, right_crop=315)
             log(f"✓ Скріншот обрізано ({len(screenshot_main_cropped)} байт)")
             
             # ЗАВТРА
@@ -1443,7 +1443,7 @@ class DTEKChecker:
                     screenshot_tomorrow = None
                 
                 if screenshot_tomorrow:
-                    screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=750, bottom_crop=1050, left_crop=650, right_crop=120)
+                    screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=1579, left_crop=775, right_crop=315)
                     log(f"✓ Скріншот обрізано ({len(screenshot_tomorrow_cropped)} байт)")
                 
                 log("🔙 Повертаюся на перший графік...")
