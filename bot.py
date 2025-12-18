@@ -1839,7 +1839,6 @@ async def check_schedule():
             
             embed = discord.Embed(
                 title=f"📊 Графік оновився {update_date_display}",
-                description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
                 color=discord.Color.gold(),
                 timestamp=timestamp_now
             )
@@ -1900,7 +1899,6 @@ async def check_schedule():
                 
                 embed_tomorrow = discord.Embed(
                     title=f"📅 Графік оновився {tomorrow_date_display}",
-                    description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
                     color=discord.Color.blue(),
                     timestamp=timestamp_now
                 )
@@ -2119,7 +2117,6 @@ async def manual_check(ctx):
         
         embed = discord.Embed(
             title=f"📊 Графік оновився {update_date_display} (Ручна перевірка)",
-            description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
             color=discord.Color.green(),
             timestamp=timestamp_now
         )
@@ -2172,7 +2169,6 @@ async def manual_check(ctx):
                 
                 embed_tomorrow = discord.Embed(
                     title=f"📅 Графік оновився {tomorrow_date_display} (Ручна перевірка)",
-                    description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
                     color=discord.Color.blue(),
                     timestamp=timestamp_now
                 )
