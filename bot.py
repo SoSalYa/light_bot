@@ -1392,8 +1392,12 @@ class DTEKChecker:
                 log(f"❌ Критична помилка при створенні скріншота: {e}")
                 raise
             
-            # Обрізаємо (crop_screenshot сам логує процес)
-            screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=800, left_crop=600, right_crop=0)
+            # Обрізаємо по оранжевій рамці:
+            # top_crop=750 - обрізаємо форму + жовтий блок зверху
+            # bottom_crop=1050 - обрізаємо жовті кнопки знизу
+            # left_crop=650 - обрізаємо зліва
+            # right_crop=120 - трохи обрізаємо справа
+            screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=750, bottom_crop=1050, left_crop=650, right_crop=120)
             log(f"✓ Скріншот обрізано ({len(screenshot_main_cropped)} байт)")
             
             # ЗАВТРА
@@ -1439,7 +1443,7 @@ class DTEKChecker:
                     screenshot_tomorrow = None
                 
                 if screenshot_tomorrow:
-                    screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=800, left_crop=600, right_crop=0)
+                    screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=750, bottom_crop=1050, left_crop=650, right_crop=120)
                     log(f"✓ Скріншот обрізано ({len(screenshot_tomorrow_cropped)} байт)")
                 
                 log("🔙 Повертаюся на перший графік...")
