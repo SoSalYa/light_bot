@@ -1129,6 +1129,66 @@ class DTEKChecker:
         
         return count
 
+    def _merge_consecutive_hours(self, hours_list):
+        """Об'єднує суміжні години в діапазони (наприклад: ['03-04', '04-05', '05-06'] -> '03-07')"""
+        if not hours_list:
+            return []
+        
+        # Сортуємо години
+        hours_list = sorted(hours_list)
+        
+        merged = []
+        current_start = None
+        current_end = None
+        
+        for hour_range in hours_list:
+            # Парсимо діапазон (наприклад "03-04")
+            try:
+                start, end = hour_range.split('-')
+                start_num = int(start.split(':')[0])
+                end_num = int(end.split(':')[0])
+                
+                if current_start is None:
+                    # Перший діапазон
+                    current_start = start
+                    current_end = end
+                    current_end_num = end_num
+                elif start_num == current_end_num:
+                    # Суміжний діапазон - продовжуємо
+                    current_end = end
+                    current_end_num = end_num
+                else:
+                    # Розрив - зберігаємо попередній і починаємо новий
+                    if current_start == current_end.split(':')[0]:
+                        merged.append(current_start)
+                    else:
+                        merged.append(f"{current_start}-{current_end}")
+                    current_start = start
+                    current_end = end
+                    current_end_num = end_num
+            except:
+                # Якщо не вдалося розпарсити - додаємо як є
+                if current_start:
+                    if current_start == current_end.split(':')[0]:
+                        merged.append(current_start)
+                    else:
+                        merged.append(f"{current_start}-{current_end}")
+                merged.append(hour_range)
+                current_start = None
+                current_end = None
+        
+        # Додаємо останній діапазон
+        if current_start:
+            # Перевіряємо чи початок і кінець однакові
+            start_hour = current_start.split(':')[0]
+            end_hour = current_end.split(':')[0]
+            if start_hour == end_hour:
+                merged.append(start_hour)
+            else:
+                merged.append(f"{start_hour}-{end_hour}")
+        
+        return merged
+
     def _compare_schedules(self, old_schedule, new_schedule):
         """Порівнює два графіки і повертає текстовий опис змін"""
         log("🔍 === ПОЧАТОК ПОРІВНЯННЯ ГРАФІКІВ ===")
@@ -1200,11 +1260,18 @@ class DTEKChecker:
             log("ℹ️ Графік не змінився")
             return None
         
+        # Об'єднуємо суміжні години
+        added_outages_merged = self._merge_consecutive_hours(added_outages)
+        removed_outages_merged = self._merge_consecutive_hours(removed_outages)
+        
+        log(f"📊 Об'єднані відключення додано: {added_outages_merged}")
+        log(f"📊 Об'єднані відключення прибрано: {removed_outages_merged}")
+        
         # Перевіряємо чи просто переставили
         if len(added_outages) == len(removed_outages) and len(added_outages) > 0:
             result = f"🔄 **Переставили відключення**\n"
-            result += f"⚡ Тепер відключення: {', '.join(added_outages)}\n"
-            result += f"✅ Тепер світло: {', '.join(removed_outages)}"
+            result += f"⚡ Тепер відключення: {', '.join(added_outages_merged)}\n"
+            result += f"✅ Тепер світло: {', '.join(removed_outages_merged)}"
             log(f"✓ Результат: Переставили відключення")
         else:
             result_parts = []
@@ -1212,18 +1279,18 @@ class DTEKChecker:
             if new_outage_count > old_outage_count:
                 diff = new_outage_count - old_outage_count
                 result_parts.append(f"⚡ **Годин без світла: +{diff}**")
-                if added_outages:
-                    result_parts.append(f"Додалось відключення: {', '.join(added_outages)}")
+                if added_outages_merged:
+                    result_parts.append(f"Додалось відключення: {', '.join(added_outages_merged)}")
             elif new_outage_count < old_outage_count:
                 diff = old_outage_count - new_outage_count
                 result_parts.append(f"✅ **Годин зі світлом: +{diff}**")
-                if removed_outages:
-                    result_parts.append(f"З'явилось світло: {', '.join(removed_outages)}")
+                if removed_outages_merged:
+                    result_parts.append(f"З'явилось світло: {', '.join(removed_outages_merged)}")
             else:
-                if added_outages:
-                    result_parts.append(f"⚡ Додалось відключення: {', '.join(added_outages)}")
-                if removed_outages:
-                    result_parts.append(f"✅ З'явилось світло: {', '.join(removed_outages)}")
+                if added_outages_merged:
+                    result_parts.append(f"⚡ Додалось відключення: {', '.join(added_outages_merged)}")
+                if removed_outages_merged:
+                    result_parts.append(f"✅ З'явилось світло: {', '.join(removed_outages_merged)}")
             
             result = "\n".join(result_parts)
         
@@ -1244,6 +1311,7 @@ class DTEKChecker:
             bottom = height - bottom_crop
             
             log(f"✂️ Обрізаю скріншот: {width}x{height} -> {right-left}x{bottom-top}")
+            log(f"   Параметри: top={top_crop}, bottom={bottom_crop}, left={left_crop}, right={right_crop}")
             
             cropped = image.crop((left, top, right, bottom))
             
@@ -1324,8 +1392,8 @@ class DTEKChecker:
                 log(f"❌ Критична помилка при створенні скріншота: {e}")
                 raise
             
-            log("✂️ Обрізаю скріншот...")
-            screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=400)
+            # Обрізаємо (crop_screenshot сам логує процес)
+            screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=800, left_crop=600, right_crop=0)
             log(f"✓ Скріншот обрізано ({len(screenshot_main_cropped)} байт)")
             
             # ЗАВТРА
@@ -1371,8 +1439,7 @@ class DTEKChecker:
                     screenshot_tomorrow = None
                 
                 if screenshot_tomorrow:
-                    log("✂️ Обрізаю скріншот...")
-                    screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=400)
+                    screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=800, left_crop=600, right_crop=0)
                     log(f"✓ Скріншот обрізано ({len(screenshot_tomorrow_cropped)} байт)")
                 
                 log("🔙 Повертаюся на перший графік...")
@@ -1767,8 +1834,11 @@ async def check_schedule():
                         log(f"Stack trace: {traceback.format_exc()}")
                         changes_text = None
             
+            # Формуємо дату для заголовка
+            update_date_display = result['update_date'] if result.get('update_date') else 'сьогодні'
+            
             embed = discord.Embed(
-                title="⚡ Графік відключень ДТЕК Київські регіональні електромережі",
+                title=f"📊 Графік оновився {update_date_display}",
                 description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
                 color=discord.Color.gold(),
                 timestamp=timestamp_now
@@ -1788,12 +1858,7 @@ async def check_schedule():
                     inline=False
                 )
             
-            embed.add_field(
-                name="✅ Статус",
-                value="**🔢 ГРАФІК ОНОВЛЕНО!**",
-                inline=False
-            )
-            embed.set_footer(text="Нова інформація • Автоматична перевірка")
+            embed.set_footer(text="Автоматична перевірка")
             
             file_main = discord.File(
                 io.BytesIO(result['screenshot_main']), 
@@ -1830,9 +1895,12 @@ async def check_schedule():
                             log(f"❌ Помилка порівняння (ЗАВТРА): {e}")
                             changes_text_tomorrow = None
                 
+                # Формуємо дату для заголовка
+                tomorrow_date_display = result['second_date'] if result.get('second_date') else 'завтра'
+                
                 embed_tomorrow = discord.Embed(
-                    title="📅 Графік відключень на завтра",
-                    description=f"**📍 Адреса:** с. Книжичі, вул. Київська, 168\n**📆 Дата:** {result['second_date'] or 'Завтра'}",
+                    title=f"📅 Графік оновився {tomorrow_date_display}",
+                    description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
                     color=discord.Color.blue(),
                     timestamp=timestamp_now
                 )
@@ -1843,6 +1911,8 @@ async def check_schedule():
                         value=changes_text_tomorrow,
                         inline=False
                     )
+                
+                embed_tomorrow.set_footer(text="Автоматична перевірка")
                 
                 file_tomorrow = discord.File(
                     io.BytesIO(result['screenshot_tomorrow']), 
@@ -2045,8 +2115,10 @@ async def manual_check(ctx):
         timestamp_str = datetime.now(UKRAINE_TZ).strftime('%Y%m%d_%H%M%S')
         
         # Відправляємо СЬОГОДНІ
+        update_date_display = result['update_date'] if result.get('update_date') else 'сьогодні'
+        
         embed = discord.Embed(
-            title="⚡ Графік відключень ДТЕК (Ручна перевірка)",
+            title=f"📊 Графік оновився {update_date_display} (Ручна перевірка)",
             description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
             color=discord.Color.green(),
             timestamp=timestamp_now
@@ -2066,7 +2138,7 @@ async def manual_check(ctx):
                 inline=False
             )
         
-        embed.set_footer(text="Ручна перевірка • Запущено командою !check")
+        embed.set_footer(text="Ручна перевірка • !check")
         
         file_main = discord.File(
             io.BytesIO(result['screenshot_main']), 
@@ -2096,9 +2168,11 @@ async def manual_check(ctx):
                         except:
                             pass
                 
+                tomorrow_date_display = result['second_date'] if result.get('second_date') else 'завтра'
+                
                 embed_tomorrow = discord.Embed(
-                    title="📅 Графік відключень на завтра",
-                    description=f"**📍 Адреса:** с. Книжичі, вул. Київська, 168\n**📆 Дата:** {result['second_date'] or 'Завтра'}",
+                    title=f"📅 Графік оновився {tomorrow_date_display} (Ручна перевірка)",
+                    description="**📍 Адреса:** с. Книжичі, вул. Київська, 168",
                     color=discord.Color.blue(),
                     timestamp=timestamp_now
                 )
@@ -2109,6 +2183,8 @@ async def manual_check(ctx):
                         value=changes_text_tomorrow,
                         inline=False
                     )
+                
+                embed_tomorrow.set_footer(text="Ручна перевірка • !check")
                 
                 file_tomorrow = discord.File(
                     io.BytesIO(result['screenshot_tomorrow']), 
