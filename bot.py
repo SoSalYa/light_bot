@@ -1,5 +1,6 @@
 import discord
 from discord.ext import commands, tasks
+from discord.ui import Button, View
 import asyncio
 from playwright.async_api import async_playwright
 import os
@@ -31,6 +32,9 @@ db_pool = None
 # Логування в пам'яті для веб-інтерфейсу
 log_buffer = deque(maxlen=500)
 
+# Глобальна змінна для зберігання поточної капчі
+current_captcha = None
+
 def log(message):
     """Логування з виводом в консоль і збереженням для веб-інтерфейсу"""
     now = datetime.now(UKRAINE_TZ)
@@ -45,6 +49,91 @@ intents = discord.Intents.default()
 intents.message_content = True
 bot = commands.Bot(command_prefix='!', intents=intents)
 
+class CaptchaState:
+    """Клас для зберігання стану капчі"""
+    def __init__(self):
+        self.active = False
+        self.screenshot = None
+        self.selected_images = []
+        self.message = None
+        self.view = None
+        self.stage = 1  # Етап капчі (1 або 2)
+        self.resolver_event = asyncio.Event()
+        self.resolved = False
+
+class CaptchaView(View):
+    """Інтерактивні кнопки для вирішення капчі"""
+    def __init__(self, captcha_state):
+        super().__init__(timeout=300)  # 5 хвилин таймаут
+        self.captcha_state = captcha_state
+        
+        # 9 кнопок для вибору картинок (3x3)
+        for i in range(9):
+            button = Button(
+                label=str(i + 1),
+                style=discord.ButtonStyle.secondary,
+                custom_id=f"img_{i}"
+            )
+            button.callback = self.create_callback(i)
+            self.add_item(button)
+        
+        # Кнопка "Перевірити"
+        verify_button = Button(
+            label="✅ Перевірити",
+            style=discord.ButtonStyle.success,
+            custom_id="verify",
+            row=3
+        )
+        verify_button.callback = self.verify_callback
+        self.add_item(verify_button)
+        
+        # Кнопка "Скинути"
+        reset_button = Button(
+            label="🔄 Скинути",
+            style=discord.ButtonStyle.danger,
+            custom_id="reset",
+            row=3
+        )
+        reset_button.callback = self.reset_callback
+        self.add_item(reset_button)
+    
+    def create_callback(self, index):
+        async def callback(interaction: discord.Interaction):
+            if index in self.captcha_state.selected_images:
+                self.captcha_state.selected_images.remove(index)
+                self.children[index].style = discord.ButtonStyle.secondary
+            else:
+                self.captcha_state.selected_images.append(index)
+                self.children[index].style = discord.ButtonStyle.primary
+            
+            await interaction.response.edit_message(
+                content=f"🧩 **Капча - Етап {self.captcha_state.stage}**\n"
+                        f"Оберіть всі картинки з потрібним об'єктом\n"
+                        f"Обрано: {len(self.captcha_state.selected_images)} картинок",
+                view=self
+            )
+        return callback
+    
+    async def verify_callback(self, interaction: discord.Interaction):
+        await interaction.response.edit_message(
+            content=f"⏳ Перевіряю вибір ({len(self.captcha_state.selected_images)} картинок)...",
+            view=None
+        )
+        self.captcha_state.resolved = True
+        self.captcha_state.resolver_event.set()
+    
+    async def reset_callback(self, interaction: discord.Interaction):
+        self.captcha_state.selected_images = []
+        for i in range(9):
+            self.children[i].style = discord.ButtonStyle.secondary
+        
+        await interaction.response.edit_message(
+            content=f"🧩 **Капча - Етап {self.captcha_state.stage}**\n"
+                    f"Оберіть всі картинки з потрібним об'єктом\n"
+                    f"Обрано: 0 картинок",
+            view=self
+        )
+
 async def init_db_pool():
     """Ініціалізація connection pool для PostgreSQL"""
     global db_pool
@@ -58,7 +147,6 @@ async def init_db_pool():
         log("✓ Database pool створено")
         
         async with db_pool.acquire() as conn:
-            # Створюємо основну таблицю
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS dtek_checks (
                     id SERIAL PRIMARY KEY,
@@ -69,24 +157,17 @@ async def init_db_pool():
                 )
             ''')
             
-            # Додаємо нові колонки якщо їх немає (міграція)
             try:
                 await conn.execute('''
                     ALTER TABLE dtek_checks 
                     ADD COLUMN IF NOT EXISTS schedule_tomorrow_hash TEXT
                 ''')
-                log("✓ Колонка schedule_tomorrow_hash додана/існує")
-            except Exception as e:
-                log(f"⚠️ Помилка додавання schedule_tomorrow_hash: {e}")
-            
-            try:
                 await conn.execute('''
                     ALTER TABLE dtek_checks 
                     ADD COLUMN IF NOT EXISTS schedule_tomorrow_data JSONB
                 ''')
-                log("✓ Колонка schedule_tomorrow_data додана/існує")
-            except Exception as e:
-                log(f"⚠️ Помилка додавання schedule_tomorrow_data: {e}")
+            except:
+                pass
         
         log("✓ Таблиця БД готова")
 
@@ -127,16 +208,13 @@ async def handle_root(request):
                 gap: 20px;
             }
             
-            .left-panel {
+            .left-panel, .right-panel {
                 display: flex;
                 flex-direction: column;
                 gap: 20px;
             }
             
             .right-panel {
-                display: flex;
-                flex-direction: column;
-                gap: 20px;
                 position: sticky;
                 top: 20px;
                 height: fit-content;
@@ -739,6 +817,8 @@ class DTEKChecker:
         self.page = None
         self.last_update_date = None
         self.cookies_file = 'dtek_cookies.json'
+        self.captcha_attempts = 0
+        self.max_captcha_attempts = 3
     
     def _get_random_user_agent(self):
         user_agents = [
@@ -754,9 +834,9 @@ class DTEKChecker:
                 cookies = await self.context.cookies()
                 with open(self.cookies_file, 'w') as f:
                     json.dump(cookies, f)
-                print("✓ Куки збережено")
+                log("✓ Куки збережено")
         except Exception as e:
-            print(f"⚠ Не вдалося зберегти куки: {e}")
+            log(f"⚠ Не вдалось зберегти куки: {e}")
     
     async def _load_cookies(self):
         try:
@@ -764,28 +844,38 @@ class DTEKChecker:
                 with open(self.cookies_file, 'r') as f:
                     cookies = json.load(f)
                 await self.context.add_cookies(cookies)
-                print("✓ Куки завантажено")
+                log("✓ Куки завантажено")
                 return True
         except Exception as e:
-            print(f"⚠ Не вдалося завантажити куки: {e}")
+            log(f"⚠ Не вдалось завантажити куки: {e}")
         return False
     
     async def _random_delay(self, min_ms=100, max_ms=500):
         await asyncio.sleep(random.uniform(min_ms/1000, max_ms/1000))
     
     async def _human_move_and_click(self, locator):
+        """Більш людяноподібний клік з рухом миші"""
         try:
             box = await locator.bounding_box()
             if box:
+                # Спочатку рухаємось до випадкової точки поруч
+                pre_x = box['x'] + random.uniform(-50, box['width'] + 50)
+                pre_y = box['y'] + random.uniform(-20, box['height'] + 20)
+                await self.page.mouse.move(pre_x, pre_y)
+                await self._random_delay(50, 150)
+                
+                # Потім до самої кнопки
                 x = box['x'] + random.uniform(box['width'] * 0.3, box['width'] * 0.7)
                 y = box['y'] + random.uniform(box['height'] * 0.3, box['height'] * 0.7)
                 await self.page.mouse.move(x, y)
                 await self._random_delay(50, 150)
             await locator.click()
+            await self._random_delay(200, 400)
         except:
             await locator.click()
     
     async def _human_type(self, locator, text):
+        """Більш людяноподібне введення тексту"""
         await locator.click()
         await self._random_delay(100, 300)
         for char in text:
@@ -794,6 +884,7 @@ class DTEKChecker:
             await locator.press_sequentially(char, delay=random.uniform(50, 200))
     
     async def _random_mouse_movements(self):
+        """Випадкові рухи миші для імітації людини"""
         try:
             for _ in range(random.randint(2, 5)):
                 x = random.randint(100, 1800)
@@ -803,6 +894,259 @@ class DTEKChecker:
         except:
             pass
     
+    async def _detect_captcha(self):
+        """Виявлення капчі на сторінці"""
+        try:
+            # Перевіряємо різні селектори капчі
+            captcha_selectors = [
+                'iframe[src*="checkbox"]',
+                'iframe[src*="recaptcha"]',
+                'iframe[src*="captcha"]',
+                '[class*="captcha"]',
+                '[id*="captcha"]'
+            ]
+            
+            for selector in captcha_selectors:
+                elements = self.page.locator(selector)
+                count = await elements.count()
+                if count > 0:
+                    log(f"🧩 Виявлено капчу: {selector}")
+                    return True
+            
+            return False
+        except Exception as e:
+            log(f"⚠️ Помилка перевірки капчі: {e}")
+            return False
+    
+    async def _handle_captcha_interactive(self, channel):
+        """Інтерактивна обробка капчі через Discord"""
+        global current_captcha
+        
+        try:
+            log("🧩 Початок обробки капчі...")
+            
+            # Робимо скріншот капчі
+            captcha_screenshot = await self.page.screenshot(type='png', full_page=False)
+            
+            # Створюємо стан капчі
+            captcha_state = CaptchaState()
+            captcha_state.active = True
+            captcha_state.screenshot = captcha_screenshot
+            current_captcha = captcha_state
+            
+            # Відправляємо в Discord з кнопками
+            file = discord.File(
+                io.BytesIO(captcha_screenshot),
+                filename=f"captcha_{datetime.now().strftime('%H%M%S')}.png"
+            )
+            
+            view = CaptchaView(captcha_state)
+            captcha_state.view = view
+            
+            embed = discord.Embed(
+                title="🧩 Виявлено капчу!",
+                description="Оберіть всі картинки з потрібним об'єктом та натисніть 'Перевірити'",
+                color=discord.Color.orange(),
+                timestamp=datetime.utcnow()
+            )
+            embed.add_field(
+                name="📝 Інструкція",
+                value="1. Натискайте на номери картинок (1-9)\n"
+                      "2. Обрані картинки стануть синіми\n"
+                      "3. Натисніть '✅ Перевірити' коли готово\n"
+                      "4. Використовуйте '🔄 Скинути' щоб почати знову",
+                inline=False
+            )
+            
+            message = await channel.send(embed=embed, file=file, view=view)
+            captcha_state.message = message
+            
+            # Чекаємо на вирішення
+            log("⏳ Очікую вирішення капчі користувачем...")
+            await asyncio.wait_for(captcha_state.resolver_event.wait(), timeout=300)
+            
+            if captcha_state.resolved:
+                log(f"✓ Користувач обрав {len(captcha_state.selected_images)} картинок")
+                
+                # Клікаємо по обраним картинкам
+                await self._click_captcha_images(captcha_state.selected_images)
+                
+                # Чекаємо трохи
+                await asyncio.sleep(2)
+                
+                # Перевіряємо чи потрібен другий етап
+                still_captcha = await self._detect_captcha()
+                
+                if still_captcha:
+                    log("🧩 Капча має другий етап...")
+                    captcha_state.stage = 2
+                    captcha_state.selected_images = []
+                    captcha_state.resolved = False
+                    captcha_state.resolver_event.clear()
+                    
+                    # Повторюємо процес для другого етапу
+                    captcha_screenshot2 = await self.page.screenshot(type='png', full_page=False)
+                    file2 = discord.File(
+                        io.BytesIO(captcha_screenshot2),
+                        filename=f"captcha_stage2_{datetime.now().strftime('%H%M%S')}.png"
+                    )
+                    
+                    view2 = CaptchaView(captcha_state)
+                    
+                    embed2 = discord.Embed(
+                        title="🧩 Капча - Етап 2",
+                        description="Оберіть картинки для другого етапу",
+                        color=discord.Color.orange(),
+                        timestamp=datetime.utcnow()
+                    )
+                    
+                    await message.edit(embed=embed2, attachments=[file2], view=view2)
+                    
+                    await asyncio.wait_for(captcha_state.resolver_event.wait(), timeout=300)
+                    
+                    if captcha_state.resolved:
+                        await self._click_captcha_images(captcha_state.selected_images)
+                        await asyncio.sleep(2)
+                
+                # Перевіряємо успішність
+                success = await self._verify_page_loaded()
+                
+                if success:
+                    log("✅ Капча успішно пройдена!")
+                    success_embed = discord.Embed(
+                        title="✅ Капча пройдена!",
+                        description="Сторінка успішно завантажена",
+                        color=discord.Color.green(),
+                        timestamp=datetime.utcnow()
+                    )
+                    await message.edit(embed=success_embed, view=None)
+                    self.captcha_attempts = 0
+                    return True
+                else:
+                    log("❌ Капча не пройдена")
+                    fail_embed = discord.Embed(
+                        title="❌ Капча не пройдена",
+                        description="Спробуємо ще раз...",
+                        color=discord.Color.red(),
+                        timestamp=datetime.utcnow()
+                    )
+                    await message.edit(embed=fail_embed, view=None)
+                    return False
+            
+            return False
+            
+        except asyncio.TimeoutError:
+            log("⏰ Таймаут очікування вирішення капчі")
+            timeout_embed = discord.Embed(
+                title="⏰ Час вийшов",
+                description="Капча не була вирішена протягом 5 хвилин",
+                color=discord.Color.dark_gray(),
+                timestamp=datetime.utcnow()
+            )
+            if current_captcha and current_captcha.message:
+                await current_captcha.message.edit(embed=timeout_embed, view=None)
+            return False
+        except Exception as e:
+            log(f"❌ Помилка обробки капчі: {e}")
+            return False
+        finally:
+            current_captcha = None
+    
+    async def _click_captcha_images(self, selected_indices):
+        """Клік по обраним картинкам капчі"""
+        try:
+            # Тут потрібна логіка кліку по конкретним частинам капчі
+            # Це залежить від розташування картинок в капчі
+            # Наприклад, для сітки 3x3:
+            
+            iframe = self.page.frame_locator('iframe[src*="recaptcha"]').first
+            
+            for index in selected_indices:
+                row = index // 3
+                col = index % 3
+                
+                # Обчислюємо координати (приблизно)
+                x = 30 + col * 100
+                y = 100 + row * 100
+                
+                await self.page.mouse.click(x, y)
+                await self._random_delay(200, 500)
+            
+            # Клік на кнопку перевірки
+            verify_button = self.page.locator('[id*="recaptcha-verify-button"]')
+            if await verify_button.count() > 0:
+                await verify_button.click()
+                await asyncio.sleep(2)
+                
+        except Exception as e:
+            log(f"⚠️ Помилка кліку по капчі: {e}")
+    
+    async def _verify_page_loaded(self):
+        """Перевірка чи сторінка завантажилась правильно"""
+        try:
+            log("🔍 Перевіряю чи сторінка завантажена...")
+            
+            # Перевіряємо відсутність капчі
+            has_captcha = await self._detect_captcha()
+            if has_captcha:
+                log("❌ Капча все ще присутня")
+                return False
+            
+            # Перевіряємо наявність поля вводу міста
+            city_input = self.page.locator('.discon-input-wrapper #city')
+            try:
+                await city_input.wait_for(state='visible', timeout=5000)
+                log("✓ Поле вводу міста знайдено")
+                return True
+            except:
+                log("❌ Поле вводу міста не знайдено")
+                return False
+            
+        except Exception as e:
+            log(f"⚠️ Помилка перевірки сторінки: {e}")
+            return False
+    
+    async def _close_survey_if_present(self):
+        """Закриває опрос якщо він з'явився"""
+        try:
+            modal_found = await self.page.evaluate("""
+                () => {
+                    const modals = document.querySelectorAll('[id^="modal-questionnaire-welcome-"]');
+                    for (const modal of modals) {
+                        const style = window.getComputedStyle(modal);
+                        if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
+                            return modal.id;
+                        }
+                    }
+                    return null;
+                }
+            """)
+            
+            if modal_found:
+                log(f"✓ Знайдено модальне вікно опросу: {modal_found}")
+                close_selector = f"#{modal_found} .modal__close"
+                try:
+                    close_btn = self.page.locator(close_selector).first
+                    if await close_btn.is_visible():
+                        await self._human_move_and_click(close_btn)
+                        log(f"✓ Опрос закрито")
+                        return True
+                except:
+                    pass
+            
+            try:
+                close_by_text = self.page.locator('button:has-text("×")').first
+                if await close_by_text.is_visible(timeout=1000):
+                    await self._human_move_and_click(close_by_text)
+                    log("✓ Опрос закрито через символ ×")
+                    return True
+            except:
+                pass
+            
+            return False
+        except Exception as e:
+            return False
+
     async def init_browser(self):
         if not self.playwright:
             self.playwright = await async_playwright().start()
@@ -850,86 +1194,43 @@ class DTEKChecker:
             await self._setup_page()
             await self._save_cookies()
     
-    async def _close_survey_if_present(self):
-        """Закриває опрос якщо він з'явився"""
-        try:
-            modal_found = await self.page.evaluate("""
-                () => {
-                    const modals = document.querySelectorAll('[id^="modal-questionnaire-welcome-"]');
-                    for (const modal of modals) {
-                        const style = window.getComputedStyle(modal);
-                        if (style.display !== 'none' && style.visibility !== 'hidden' && style.opacity !== '0') {
-                            return modal.id;
-                        }
-                    }
-                    return null;
-                }
-            """)
-            
-            if modal_found:
-                log(f"✓ Знайдено модальне вікно опросу: {modal_found}")
-                close_selector = f"#{modal_found} .modal__close"
-                try:
-                    close_btn = self.page.locator(close_selector).first
-                    if await close_btn.is_visible():
-                        await close_btn.click()
-                        await asyncio.sleep(1)
-                        log(f"✓ Опрос закрито")
-                        return True
-                except:
-                    pass
-            
-            try:
-                close_by_text = self.page.locator('button:has-text("×")').first
-                if await close_by_text.is_visible(timeout=1000):
-                    await close_by_text.click()
-                    await asyncio.sleep(1)
-                    log("✓ Опрос закрито через символ ×")
-                    return True
-            except:
-                pass
-            
-            return False
-        except Exception as e:
-            return False
-
     async def _setup_page(self):
-        """Налаштування сторінки"""
+        """Налаштування сторінки з обробкою капчі"""
         log("🔧 Налаштування сторінки...")
+        
+        channel = bot.get_channel(CHANNEL_ID)
         
         await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='domcontentloaded', timeout=90000)
         await asyncio.sleep(5)
         await self._close_survey_if_present()
         await asyncio.sleep(1)
         
-        try:
-            captcha_checkbox = self.page.locator('iframe[src*="checkbox"]')
-            captcha_count = await captcha_checkbox.count()
+        # Перевіряємо капчу
+        has_captcha = await self._detect_captcha()
+        
+        if has_captcha and channel:
+            log("⚠️ Виявлено капчу! Починаю інтерактивне вирішення...")
             
-            if captcha_count > 0:
-                log("⚠️ Виявлено капчу! Використовуйте веб-інтерфейс для проходження.")
-                log("🌐 Клікніть по капчі в веб-інтерфейсі")
+            self.captcha_attempts = 0
+            while self.captcha_attempts < self.max_captcha_attempts:
+                self.captcha_attempts += 1
+                log(f"🧩 Спроба {self.captcha_attempts}/{self.max_captcha_attempts}")
                 
-                for i in range(300):
-                    await asyncio.sleep(1)
-                    current_count = await captcha_checkbox.count()
-                    if current_count == 0:
-                        log("✓ Капча пройдена!")
-                        await self._save_cookies()
-                        await asyncio.sleep(2)
-                        break
-                    
-                    if i > 0 and i % 30 == 0:
-                        log(f"⏳ Очікування капчі... ({i} сек)")
+                success = await self._handle_captcha_interactive(channel)
                 
-                if await captcha_checkbox.count() > 0:
-                    log("❌ Капча не пройдена за 5 хвилин. Спробуйте знову.")
-                    
-        except Exception as e:
-            log(f"⚠ Помилка при перевірці капчі: {e}")
+                if success:
+                    break
+                
+                if self.captcha_attempts < self.max_captcha_attempts:
+                    log("🔄 Перезавантажую сторінку для нової спроби...")
+                    await self.page.reload(wait_until='domcontentloaded', timeout=30000)
+                    await asyncio.sleep(3)
+            
+            if self.captcha_attempts >= self.max_captcha_attempts:
+                log("❌ Вичерпано всі спроби проходження капчі")
+                raise Exception("Не вдалось пройти капчу після всіх спроб")
         
-        await asyncio.sleep(2)
-        
+        # Закриваємо спливаюче вікно якщо є
         try:
             close_btn = self.page.locator('button.m-attention__close')
             if await close_btn.count() > 0:
@@ -938,13 +1239,18 @@ class DTEKChecker:
         except:
             pass
         
-        log("📝 Вводжу місто...")
+        # Імітуємо людяноподібну поведінку перед заповненням
+        await self._random_mouse_movements()
+        await self._random_delay(500, 1000)
+        
+        # Вводимо місто
+        log("🏙 Вводжу місто...")
         city_input = self.page.locator('.discon-input-wrapper #city')
         await city_input.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(city_input)
         await city_input.clear()
         await asyncio.sleep(0.5)
-        await self._human_type(city_input, 'княж')
+        await self._human_type(city_input, 'книж')
         await asyncio.sleep(2)
         
         city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
@@ -952,13 +1258,14 @@ class DTEKChecker:
         await self._human_move_and_click(city_option)
         await asyncio.sleep(2)
         
-        log("📝 Вводжу вулицю...")
+        # Вводимо вулицю
+        log("🛣 Вводжу вулицю...")
         street_input = self.page.locator('.discon-input-wrapper #street')
         await street_input.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(street_input)
         await street_input.clear()
         await asyncio.sleep(0.5)
-        await self._human_type(street_input, 'киЇ')
+        await self._human_type(street_input, 'київ')
         await asyncio.sleep(2)
         
         street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
@@ -966,7 +1273,8 @@ class DTEKChecker:
         await self._human_move_and_click(street_option)
         await asyncio.sleep(2)
         
-        log("📝 Вводжу будинок...")
+        # Вводимо будинок
+        log("🏠 Вводжу будинок...")
         house_input = self.page.locator('input#house_num')
         await house_input.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(house_input)
@@ -982,6 +1290,7 @@ class DTEKChecker:
         
         await self._close_survey_if_present()
         
+        # Отримуємо дату оновлення
         try:
             update_elem = self.page.locator('span.update')
             await update_elem.wait_for(state='visible', timeout=15000)
@@ -989,14 +1298,14 @@ class DTEKChecker:
             self.last_update_date = self.last_update_date.strip()
             log(f"✓ Дата оновлення: {self.last_update_date}")
         except Exception as e:
-            log(f"⚠ Не вдалося отримати дату: {e}")
+            log(f"⚠ Не вдалось отримати дату: {e}")
             self.last_update_date = "Невідомо"
         
         log("✅ Сторінка налаштована!")
         await self._save_cookies()
 
     async def check_for_update(self):
-        """Перевіряє чи змінилась дата"""
+        """Перевіряє чи змінилась дата з обробкою помилок"""
         try:
             await self._close_survey_if_present()
             
@@ -1009,10 +1318,28 @@ class DTEKChecker:
             try:
                 await update_elem.wait_for(state='visible', timeout=15000)
             except asyncio.TimeoutError:
-                log("⚠️ Елемент дати не з'явився за 15 секунд, перезавантажую сторінку...")
-                await self.page.reload(wait_until='domcontentloaded', timeout=30000)
-                await asyncio.sleep(3)
-                await update_elem.wait_for(state='visible', timeout=15000)
+                log("⚠️ Елемент дати не з'явився - перевіряю на помилки...")
+                
+                # Перевіряємо чи є капча
+                has_captcha = await self._detect_captcha()
+                if has_captcha:
+                    log("🧩 Виявлено капчу! Обробляю...")
+                    channel = bot.get_channel(CHANNEL_ID)
+                    if channel:
+                        success = await self._handle_captcha_interactive(channel)
+                        if success:
+                            # Пробуємо знову після проходження капчі
+                            await update_elem.wait_for(state='visible', timeout=15000)
+                        else:
+                            log("❌ Не вдалось пройти капчу")
+                            return False
+                else:
+                    # Якщо капчі немає, просто перезавантажуємо
+                    log("🔄 Перезавантажую сторінку...")
+                    await self.page.reload(wait_until='domcontentloaded', timeout=30000)
+                    await asyncio.sleep(3)
+                    await self._close_survey_if_present()
+                    await update_elem.wait_for(state='visible', timeout=15000)
             
             current_date = await update_elem.text_content()
             current_date = current_date.strip()
@@ -1030,6 +1357,18 @@ class DTEKChecker:
             return False
         except Exception as e:
             log(f"❌ Помилка при перевірці: {e}")
+            
+            # Останній шанс - перевіряємо капчу
+            try:
+                has_captcha = await self._detect_captcha()
+                if has_captcha:
+                    log("🧩 Виявлено капчу після помилки!")
+                    channel = bot.get_channel(CHANNEL_ID)
+                    if channel:
+                        await self._handle_captcha_interactive(channel)
+            except:
+                pass
+            
             return False
 
     async def parse_schedule(self):
@@ -1130,11 +1469,10 @@ class DTEKChecker:
         return count
 
     def _merge_consecutive_hours(self, hours_list):
-        """Об'єднує суміжні години в діапазони (наприклад: ['03-04', '04-05', '05-06'] -> '03-07')"""
+        """Об'єднує суміжні години в діапазони"""
         if not hours_list:
             return []
         
-        # Сортуємо години
         hours_list = sorted(hours_list)
         
         merged = []
@@ -1142,23 +1480,19 @@ class DTEKChecker:
         current_end = None
         
         for hour_range in hours_list:
-            # Парсимо діапазон (наприклад "03-04")
             try:
                 start, end = hour_range.split('-')
                 start_num = int(start.split(':')[0])
                 end_num = int(end.split(':')[0])
                 
                 if current_start is None:
-                    # Перший діапазон
                     current_start = start
                     current_end = end
                     current_end_num = end_num
                 elif start_num == current_end_num:
-                    # Суміжний діапазон - продовжуємо
                     current_end = end
                     current_end_num = end_num
                 else:
-                    # Розрив - зберігаємо попередній і починаємо новий
                     if current_start == current_end.split(':')[0]:
                         merged.append(current_start)
                     else:
@@ -1167,7 +1501,6 @@ class DTEKChecker:
                     current_end = end
                     current_end_num = end_num
             except:
-                # Якщо не вдалося розпарсити - додаємо як є
                 if current_start:
                     if current_start == current_end.split(':')[0]:
                         merged.append(current_start)
@@ -1177,9 +1510,7 @@ class DTEKChecker:
                 current_start = None
                 current_end = None
         
-        # Додаємо останній діапазон
         if current_start:
-            # Перевіряємо чи початок і кінець однакові
             start_hour = current_start.split(':')[0]
             end_hour = current_end.split(':')[0]
             if start_hour == end_hour:
@@ -1193,43 +1524,24 @@ class DTEKChecker:
         """Порівнює два графіки і повертає текстовий опис змін"""
         log("🔍 === ПОЧАТОК ПОРІВНЯННЯ ГРАФІКІВ ===")
         
-        log(f"🔍 Тип old_schedule: {type(old_schedule)}")
-        log(f"🔍 Тип new_schedule: {type(new_schedule)}")
-        
         if isinstance(old_schedule, str):
-            log("⚠️ old_schedule є строкою, парсимо JSON...")
             try:
                 old_schedule = json.loads(old_schedule)
-                log("✓ JSON успішно розпарсено")
-            except Exception as e:
-                log(f"❌ Помилка парсингу JSON: {e}")
+            except:
                 return "📊 Помилка парсингу старого графіка"
         
         if isinstance(new_schedule, str):
-            log("⚠️ new_schedule є строкою, парсимо JSON...")
             try:
                 new_schedule = json.loads(new_schedule)
-                log("✓ JSON успішно розпарсено")
-            except Exception as e:
-                log(f"❌ Помилка парсингу JSON: {e}")
+            except:
                 return "📊 Помилка парсингу нового графіка"
         
         if not old_schedule or not new_schedule:
-            log("⚠️ Один з графіків порожній")
             return "📊 Перша перевірка - немає з чим порівнювати"
         
-        if 'schedule' not in old_schedule:
-            log(f"❌ 'schedule' відсутній в old_schedule. Ключі: {old_schedule.keys()}")
-            return "📊 Некоректний формат старого графіка"
+        if 'schedule' not in old_schedule or 'schedule' not in new_schedule:
+            return "📊 Некоректний формат графіка"
         
-        if 'schedule' not in new_schedule:
-            log(f"❌ 'schedule' відсутній в new_schedule. Ключі: {new_schedule.keys()}")
-            return "📊 Некоректний формат нового графіка"
-        
-        log(f"✓ Кількість годин в старому графіку: {len(old_schedule['schedule'])}")
-        log(f"✓ Кількість годин в новому графіку: {len(new_schedule['schedule'])}")
-        
-        # Підраховуємо години з відключеннями
         old_outage_count = self._count_outage_hours(old_schedule)
         new_outage_count = self._count_outage_hours(new_schedule)
         
@@ -1243,36 +1555,21 @@ class DTEKChecker:
             old_status = old_schedule['schedule'].get(hour, {}).get('status', 'unknown')
             new_status = new_schedule['schedule'][hour]['status']
             
-            if old_status != new_status:
-                log(f"🔄 Зміна в {hour}: {old_status} → {new_status}")
-            
             if old_status in ['powered'] and new_status in ['scheduled', 'first-half', 'second-half']:
                 added_outages.append(hour)
-                log(f"⚡ {hour}: З'явилось відключення")
             elif old_status in ['scheduled', 'first-half', 'second-half'] and new_status in ['powered']:
                 removed_outages.append(hour)
-                log(f"✅ {hour}: З'явилось світло")
         
-        log(f"📊 Підсумок: додано відключень: {len(added_outages)}, прибрано: {len(removed_outages)}")
-        
-        # Формуємо підсумковий текст
         if not added_outages and not removed_outages:
-            log("ℹ️ Графік не змінився")
             return None
         
-        # Об'єднуємо суміжні години
         added_outages_merged = self._merge_consecutive_hours(added_outages)
         removed_outages_merged = self._merge_consecutive_hours(removed_outages)
         
-        log(f"📊 Об'єднані відключення додано: {added_outages_merged}")
-        log(f"📊 Об'єднані відключення прибрано: {removed_outages_merged}")
-        
-        # Перевіряємо чи просто переставили
         if len(added_outages) == len(removed_outages) and len(added_outages) > 0:
             result = f"🔄 **Переставили відключення**\n"
             result += f"⚡ Тепер відключення: {', '.join(added_outages_merged)}\n"
             result += f"✅ Тепер світло: {', '.join(removed_outages_merged)}"
-            log(f"✓ Результат: Переставили відключення")
         else:
             result_parts = []
             
@@ -1294,9 +1591,7 @@ class DTEKChecker:
             
             result = "\n".join(result_parts)
         
-        log(f"✓ Результат порівняння: {result}")
         log("🔍 === КІНЕЦЬ ПОРІВНЯННЯ ГРАФІКІВ ===")
-        
         return result
 
     def crop_screenshot(self, screenshot_bytes, top_crop=300, bottom_crop=400, left_crop=0, right_crop=0):
@@ -1309,9 +1604,6 @@ class DTEKChecker:
             top = top_crop
             right = width - right_crop
             bottom = height - bottom_crop
-            
-            log(f"✂️ Обрізаю скріншот: {width}x{height} -> {right-left}x{bottom-top}")
-            log(f"   Координати: left={left}, top={top}, right={right}, bottom={bottom}")
             
             cropped = image.crop((left, top, right, bottom))
             
@@ -1341,21 +1633,18 @@ class DTEKChecker:
                     try:
                         await self.page.reload(wait_until='domcontentloaded', timeout=30000)
                         await asyncio.sleep(2)
-                        log("✓ Сторінка оновлена")
                     except:
-                        log("⚠️ Не вдалося оновити сторінку")
+                        pass
                 else:
-                    log(f"❌ Всі {max_attempts} спроби вичерпано")
                     raise
             except Exception as e:
                 log(f"❌ Помилка при створенні скріншота: {e}")
                 if attempt < max_attempts:
-                    log("🔄 Пробую ще раз...")
                     await asyncio.sleep(3)
                 else:
                     raise
         
-        raise Exception(f"Не вдалося зробити скріншот за {max_attempts} спроб")
+        raise Exception(f"Не вдалось зробити скріншот за {max_attempts} спроб")
 
     async def make_screenshots(self):
         """Робить скріншоти з парсингом графіка"""
@@ -1370,35 +1659,11 @@ class DTEKChecker:
             log("📊 ПАРСИНГ ГРАФІКА НА СЬОГОДНІ")
             log("="*50)
             
-            log("📋 Парсю графік на сьогодні...")
             schedule_today = await self.parse_schedule()
-            if schedule_today:
-                log(f"✓ Графік розпарсено: {len(schedule_today.get('schedule', {}))} годин")
-            else:
-                log("❌ Не вдалося розпарсити графік")
-            
-            log("🔍 Перевіряю що таблиця графіка видима...")
-            try:
-                table = self.page.locator('.active > table')
-                await table.wait_for(state='visible', timeout=10000)
-                log("✓ Таблиця графіка видима")
-            except Exception as e:
-                log(f"⚠️ Таблиця не знайдена: {e}")
             
             log("📸 Роблю скріншот основного графіка...")
-            try:
-                screenshot_main = await self._make_screenshot_with_retry(max_attempts=2)
-            except Exception as e:
-                log(f"❌ Критична помилка при створенні скріншота: {e}")
-                raise
-            
-            # Обрізаємо за точними координатами:
-            # top_crop=300 - як було спочатку (зверху)
-            # left_crop=775 - зліва x=775
-            # right на x=1605, width=1920, тому right_crop=1920-1605=315
-            # bottom на y=1015, height=2594, тому bottom_crop=2594-1015=1579
+            screenshot_main = await self._make_screenshot_with_retry(max_attempts=2)
             screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=1579, left_crop=775, right_crop=315)
-            log(f"✓ Скріншот обрізано ({len(screenshot_main_cropped)} байт)")
             
             # ЗАВТРА
             log("")
@@ -1411,57 +1676,27 @@ class DTEKChecker:
             schedule_tomorrow = None
             
             try:
-                log("🔍 Шукаю другий графік...")
                 date_selector = self.page.locator('div.date:nth-child(2)')
                 await date_selector.wait_for(state='visible', timeout=15000)
                 
                 second_date = await date_selector.text_content()
                 second_date = second_date.strip()
-                log(f"📅 Дата другого графіка: {second_date}")
                 
-                log("🖱️ Клікаю на другий графік...")
-                await date_selector.click()
-                log("⏳ Чекаю завантаження (2 сек)...")
+                await self._human_move_and_click(date_selector)
                 await asyncio.sleep(2)
-                
-                log("🔍 Перевіряю опрос після переключення...")
                 await self._close_survey_if_present()
                 
-                log("📋 Парсю графік на завтра...")
                 schedule_tomorrow = await self.parse_schedule()
-                if schedule_tomorrow:
-                    log(f"✓ Графік розпарсено: {len(schedule_tomorrow.get('schedule', {}))} годин")
+                screenshot_tomorrow = await self._make_screenshot_with_retry(max_attempts=2)
+                screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=1579, left_crop=775, right_crop=315)
                 
-                log("📸 Роблю скріншот другого графіка...")
-                try:
-                    screenshot_tomorrow = await self._make_screenshot_with_retry(max_attempts=2)
-                except asyncio.TimeoutError:
-                    log("❌ Таймаут при створенні скріншота завтра після всіх спроб")
-                    screenshot_tomorrow = None
-                except Exception as e:
-                    log(f"❌ Помилка скріншота завтра: {e}")
-                    screenshot_tomorrow = None
-                
-                if screenshot_tomorrow:
-                    screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=1579, left_crop=775, right_crop=315)
-                    log(f"✓ Скріншот обрізано ({len(screenshot_tomorrow_cropped)} байт)")
-                
-                log("🔙 Повертаюся на перший графік...")
                 first_date = self.page.locator('div.date:nth-child(1)')
                 await first_date.wait_for(state='visible', timeout=10000)
-                await first_date.click()
+                await self._human_move_and_click(first_date)
                 await asyncio.sleep(2)
-                log(f"✓ Повернувся на перший графік")
                 
-            except asyncio.TimeoutError:
-                log(f"⚠ Таймаут при роботі зі другим графіком")
             except Exception as e:
-                log(f"⚠ Не вдалося отримати другий графік: {e}")
-            
-            log("")
-            log("="*50)
-            log("✅ СКРІНШОТИ ГОТОВІ")
-            log("="*50)
+                log(f"⚠ Не вдалось отримати другий графік: {e}")
             
             return {
                 'screenshot_main': screenshot_main_cropped,
@@ -1475,8 +1710,6 @@ class DTEKChecker:
             
         except Exception as e:
             log(f"✖️ Помилка при створенні скріншотів: {e}")
-            import traceback
-            log(f"Stack trace: {traceback.format_exc()}")
             raise
 
     async def close_browser(self):
@@ -1500,14 +1733,12 @@ class DTEKChecker:
         """Повний перезапуск браузера"""
         log("🔄 Починаю перезапуск браузера...")
         try:
-            # Зберігаємо останню дату перед закриттям
             old_date = self.last_update_date
             
             await self._save_cookies()
             await self.close_browser()
             await asyncio.sleep(3)
             
-            # Ініціалізуємо заново - це включає заповнення форми
             await self.init_browser()
             
             log("✅ Браузер успішно перезапущено!")
@@ -1517,8 +1748,6 @@ class DTEKChecker:
             return True
         except Exception as e:
             log(f"❌ Помилка при перезапуску браузера: {e}")
-            import traceback
-            log(f"Stack trace: {traceback.format_exc()}")
             return False
 
 checker = DTEKChecker()
