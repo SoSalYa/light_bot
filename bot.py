@@ -1295,7 +1295,7 @@ class DTEKChecker:
         await self._human_move_and_click(city_input)
         await city_input.clear()
         await asyncio.sleep(0.5)
-        await self._human_type(city_input, 'книж')
+        await self._human_type(city_input, 'княж')
         await asyncio.sleep(2)
         
         city_option = self.page.locator('#cityautocomplete-list > div:nth-child(2)')
