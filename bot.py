@@ -1313,7 +1313,7 @@ class DTEKChecker:
         await self._human_type(street_input, 'київ')
         await asyncio.sleep(2)
         
-        street_option = self.page.locator('#streetautocomplete-list > div:nth-child(2)')
+        street_option = self.page.locator('#streetautocomplete-list > div:nth-child(1)')
         await street_option.wait_for(state='visible', timeout=15000)
         await self._human_move_and_click(street_option)
         await asyncio.sleep(2)
