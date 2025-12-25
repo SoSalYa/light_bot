@@ -147,6 +147,7 @@ async def init_db_pool():
         log("✓ Database pool створено")
         
         async with db_pool.acquire() as conn:
+            # Створюємо основну таблицю
             await conn.execute('''
                 CREATE TABLE IF NOT EXISTS dtek_checks (
                     id SERIAL PRIMARY KEY,
@@ -157,17 +158,24 @@ async def init_db_pool():
                 )
             ''')
             
+            # Додаємо нові колонки якщо їх немає (міграція)
             try:
                 await conn.execute('''
                     ALTER TABLE dtek_checks 
                     ADD COLUMN IF NOT EXISTS schedule_tomorrow_hash TEXT
                 ''')
+                log("✓ Колонка schedule_tomorrow_hash додана/існує")
+            except Exception as e:
+                log(f"⚠️ Помилка додавання schedule_tomorrow_hash: {e}")
+            
+            try:
                 await conn.execute('''
                     ALTER TABLE dtek_checks 
                     ADD COLUMN IF NOT EXISTS schedule_tomorrow_data JSONB
                 ''')
-            except:
-                pass
+                log("✓ Колонка schedule_tomorrow_data додана/існує")
+            except Exception as e:
+                log(f"⚠️ Помилка додавання schedule_tomorrow_data: {e}")
         
         log("✓ Таблиця БД готова")
 
@@ -208,13 +216,16 @@ async def handle_root(request):
                 gap: 20px;
             }
             
-            .left-panel, .right-panel {
+            .left-panel {
                 display: flex;
                 flex-direction: column;
                 gap: 20px;
             }
             
             .right-panel {
+                display: flex;
+                flex-direction: column;
+                gap: 20px;
                 position: sticky;
                 top: 20px;
                 height: fit-content;
@@ -834,9 +845,9 @@ class DTEKChecker:
                 cookies = await self.context.cookies()
                 with open(self.cookies_file, 'w') as f:
                     json.dump(cookies, f)
-                log("✓ Куки збережено")
+                print("✓ Куки збережено")
         except Exception as e:
-            log(f"⚠ Не вдалось зберегти куки: {e}")
+            print(f"⚠ Не вдалось зберегти куки: {e}")
     
     async def _load_cookies(self):
         try:
@@ -844,10 +855,10 @@ class DTEKChecker:
                 with open(self.cookies_file, 'r') as f:
                     cookies = json.load(f)
                 await self.context.add_cookies(cookies)
-                log("✓ Куки завантажено")
+                print("✓ Куки завантажено")
                 return True
         except Exception as e:
-            log(f"⚠ Не вдалось завантажити куки: {e}")
+            print(f"⚠ Не вдалось завантажити куки: {e}")
         return False
     
     async def _random_delay(self, min_ms=100, max_ms=500):
@@ -894,25 +905,60 @@ class DTEKChecker:
         except:
             pass
     
-    async def _detect_captcha(self):
-        """Виявлення капчі на сторінці"""
+    async def _close_attention_popup(self):
+        """Закриває спливаюче вікно "Шановні клієнти!" про відключення"""
         try:
-            # Перевіряємо різні селектори капчі
-            captcha_selectors = [
-                'iframe[src*="checkbox"]',
+            log("🔍 Перевіряю наявність спливаючого вікна...")
+            
+            # Пробуємо закрити через кнопку .m-attention__close
+            close_btn = self.page.locator('button.m-attention__close')
+            if await close_btn.count() > 0 and await close_btn.is_visible():
+                log("✓ Знайдено спливаюче вікно - закриваю")
+                await self._human_move_and_click(close_btn)
+                await asyncio.sleep(1)
+                log("✓ Спливаюче вікно закрито")
+                return True
+            
+            # Альтернативний варіант - пошук по тексту
+            close_x = self.page.locator('button:has-text("×")').first
+            if await close_x.count() > 0:
+                try:
+                    if await close_x.is_visible(timeout=1000):
+                        log("✓ Знайдено кнопку × - закриваю")
+                        await self._human_move_and_click(close_x)
+                        await asyncio.sleep(1)
+                        log("✓ Вікно закрито через ×")
+                        return True
+                except:
+                    pass
+            
+            log("ℹ️ Спливаюче вікно не знайдено")
+            return False
+        except Exception as e:
+            log(f"⚠️ Помилка закриття спливаючого вікна: {e}")
+            return False
+    
+    async def _detect_captcha(self):
+        """Виявлення ТІЛЬКИ реальної капчі (iframe recaptcha) - НЕ спливаючі вікна!"""
+        try:
+            log("🔍 Перевіряю наявність капчі (iframe)...")
+            
+            # Шукаємо ТІЛЬКИ iframe з recaptcha/captcha/checkbox
+            captcha_iframes = [
                 'iframe[src*="recaptcha"]',
                 'iframe[src*="captcha"]',
-                '[class*="captcha"]',
-                '[id*="captcha"]'
+                'iframe[title*="reCAPTCHA"]',
+                'iframe[src*="checkbox"]'
             ]
             
-            for selector in captcha_selectors:
+            for selector in captcha_iframes:
                 elements = self.page.locator(selector)
                 count = await elements.count()
                 if count > 0:
-                    log(f"🧩 Виявлено капчу: {selector}")
+                    log(f"🧩 ВИЯВЛЕНО РЕАЛЬНУ КАПЧУ: {selector} (кількість: {count})")
                     return True
             
+            log("✓ Капча (iframe) не виявлена")
             return False
         except Exception as e:
             log(f"⚠️ Помилка перевірки капчі: {e}")
@@ -1055,26 +1101,26 @@ class DTEKChecker:
     async def _click_captcha_images(self, selected_indices):
         """Клік по обраним картинкам капчі"""
         try:
-            # Тут потрібна логіка кліку по конкретним частинам капчі
-            # Це залежить від розташування картинок в капчі
-            # Наприклад, для сітки 3x3:
+            log(f"🖱️ Клікаю по обраним картинкам: {selected_indices}")
             
-            iframe = self.page.frame_locator('iframe[src*="recaptcha"]').first
-            
+            # Для сітки 3x3 обчислюємо координати
             for index in selected_indices:
                 row = index // 3
                 col = index % 3
                 
-                # Обчислюємо координати (приблизно)
+                # Обчислюємо координати (приблизно, залежить від розташування капчі)
+                # Це потрібно буде налаштувати під конкретну капчу
                 x = 30 + col * 100
                 y = 100 + row * 100
                 
+                log(f"  Клік на картинку {index+1}: ({x}, {y})")
                 await self.page.mouse.click(x, y)
                 await self._random_delay(200, 500)
             
             # Клік на кнопку перевірки
             verify_button = self.page.locator('[id*="recaptcha-verify-button"]')
             if await verify_button.count() > 0:
+                log("✓ Натискаю кнопку перевірки")
                 await verify_button.click()
                 await asyncio.sleep(2)
                 
@@ -1096,7 +1142,7 @@ class DTEKChecker:
             city_input = self.page.locator('.discon-input-wrapper #city')
             try:
                 await city_input.wait_for(state='visible', timeout=5000)
-                log("✓ Поле вводу міста знайдено")
+                log("✓ Поле вводу міста знайдено - сторінка завантажена")
                 return True
             except:
                 log("❌ Поле вводу міста не знайдено")
@@ -1144,7 +1190,7 @@ class DTEKChecker:
                 pass
             
             return False
-        except Exception as e:
+        except:
             return False
 
     async def init_browser(self):
@@ -1195,17 +1241,23 @@ class DTEKChecker:
             await self._save_cookies()
     
     async def _setup_page(self):
-        """Налаштування сторінки з обробкою капчі"""
+        """Налаштування сторінки з правильною обробкою вікон"""
         log("🔧 Налаштування сторінки...")
         
         channel = bot.get_channel(CHANNEL_ID)
         
         await self.page.goto('https://www.dtek-krem.com.ua/ua/shutdowns', wait_until='domcontentloaded', timeout=90000)
         await asyncio.sleep(5)
+        
+        # СПОЧАТКУ закриваємо спливаюче вікно "Шановні клієнти!"
+        await self._close_attention_popup()
+        await asyncio.sleep(1)
+        
+        # Закриваємо опрос якщо є
         await self._close_survey_if_present()
         await asyncio.sleep(1)
         
-        # Перевіряємо капчу
+        # ТІЛЬКИ ТЕПЕР перевіряємо реальну капчу (iframe)
         has_captcha = await self._detect_captcha()
         
         if has_captcha and channel:
@@ -1225,19 +1277,12 @@ class DTEKChecker:
                     log("🔄 Перезавантажую сторінку для нової спроби...")
                     await self.page.reload(wait_until='domcontentloaded', timeout=30000)
                     await asyncio.sleep(3)
+                    await self._close_attention_popup()
+                    await self._close_survey_if_present()
             
             if self.captcha_attempts >= self.max_captcha_attempts:
                 log("❌ Вичерпано всі спроби проходження капчі")
                 raise Exception("Не вдалось пройти капчу після всіх спроб")
-        
-        # Закриваємо спливаюче вікно якщо є
-        try:
-            close_btn = self.page.locator('button.m-attention__close')
-            if await close_btn.count() > 0:
-                await self._human_move_and_click(close_btn)
-                await asyncio.sleep(1)
-        except:
-            pass
         
         # Імітуємо людяноподібну поведінку перед заповненням
         await self._random_mouse_movements()
@@ -1307,6 +1352,8 @@ class DTEKChecker:
     async def check_for_update(self):
         """Перевіряє чи змінилась дата з обробкою помилок"""
         try:
+            # Закриваємо всі вікна спочатку
+            await self._close_attention_popup()
             await self._close_survey_if_present()
             
             if random.random() < 0.3:
@@ -1338,6 +1385,7 @@ class DTEKChecker:
                     log("🔄 Перезавантажую сторінку...")
                     await self.page.reload(wait_until='domcontentloaded', timeout=30000)
                     await asyncio.sleep(3)
+                    await self._close_attention_popup()
                     await self._close_survey_if_present()
                     await update_elem.wait_for(state='visible', timeout=15000)
             
@@ -1469,10 +1517,11 @@ class DTEKChecker:
         return count
 
     def _merge_consecutive_hours(self, hours_list):
-        """Об'єднує суміжні години в діапазони"""
+        """Об'єднує суміжні години в діапазони (наприклад: ['03-04', '04-05', '05-06'] -> '03-07')"""
         if not hours_list:
             return []
         
+        # Сортуємо години
         hours_list = sorted(hours_list)
         
         merged = []
@@ -1480,19 +1529,23 @@ class DTEKChecker:
         current_end = None
         
         for hour_range in hours_list:
+            # Парсимо діапазон (наприклад "03-04")
             try:
                 start, end = hour_range.split('-')
                 start_num = int(start.split(':')[0])
                 end_num = int(end.split(':')[0])
                 
                 if current_start is None:
+                    # Перший діапазон
                     current_start = start
                     current_end = end
                     current_end_num = end_num
                 elif start_num == current_end_num:
+                    # Суміжний діапазон - продовжуємо
                     current_end = end
                     current_end_num = end_num
                 else:
+                    # Розрив - зберігаємо попередній і починаємо новий
                     if current_start == current_end.split(':')[0]:
                         merged.append(current_start)
                     else:
@@ -1501,6 +1554,7 @@ class DTEKChecker:
                     current_end = end
                     current_end_num = end_num
             except:
+                # Якщо не вдалось розпарсити - додаємо як є
                 if current_start:
                     if current_start == current_end.split(':')[0]:
                         merged.append(current_start)
@@ -1510,7 +1564,9 @@ class DTEKChecker:
                 current_start = None
                 current_end = None
         
+        # Додаємо останній діапазон
         if current_start:
+            # Перевіряємо чи початок і кінець однакові
             start_hour = current_start.split(':')[0]
             end_hour = current_end.split(':')[0]
             if start_hour == end_hour:
@@ -1524,24 +1580,43 @@ class DTEKChecker:
         """Порівнює два графіки і повертає текстовий опис змін"""
         log("🔍 === ПОЧАТОК ПОРІВНЯННЯ ГРАФІКІВ ===")
         
+        log(f"🔍 Тип old_schedule: {type(old_schedule)}")
+        log(f"🔍 Тип new_schedule: {type(new_schedule)}")
+        
         if isinstance(old_schedule, str):
+            log("⚠️ old_schedule є рядком, парсимо JSON...")
             try:
                 old_schedule = json.loads(old_schedule)
-            except:
+                log("✓ JSON успішно розпарсено")
+            except Exception as e:
+                log(f"❌ Помилка парсингу JSON: {e}")
                 return "📊 Помилка парсингу старого графіка"
         
         if isinstance(new_schedule, str):
+            log("⚠️ new_schedule є рядком, парсимо JSON...")
             try:
                 new_schedule = json.loads(new_schedule)
-            except:
+                log("✓ JSON успішно розпарсено")
+            except Exception as e:
+                log(f"❌ Помилка парсингу JSON: {e}")
                 return "📊 Помилка парсингу нового графіка"
         
         if not old_schedule or not new_schedule:
+            log("⚠️ Один з графіків порожній")
             return "📊 Перша перевірка - немає з чим порівнювати"
         
-        if 'schedule' not in old_schedule or 'schedule' not in new_schedule:
-            return "📊 Некоректний формат графіка"
+        if 'schedule' not in old_schedule:
+            log(f"❌ 'schedule' відсутній в old_schedule. Ключі: {old_schedule.keys()}")
+            return "📊 Некоректний формат старого графіка"
         
+        if 'schedule' not in new_schedule:
+            log(f"❌ 'schedule' відсутній в new_schedule. Ключі: {new_schedule.keys()}")
+            return "📊 Некоректний формат нового графіка"
+        
+        log(f"✓ Кількість годин в старому графіку: {len(old_schedule['schedule'])}")
+        log(f"✓ Кількість годин в новому графіку: {len(new_schedule['schedule'])}")
+        
+        # Підраховуємо години з відключеннями
         old_outage_count = self._count_outage_hours(old_schedule)
         new_outage_count = self._count_outage_hours(new_schedule)
         
@@ -1555,21 +1630,36 @@ class DTEKChecker:
             old_status = old_schedule['schedule'].get(hour, {}).get('status', 'unknown')
             new_status = new_schedule['schedule'][hour]['status']
             
+            if old_status != new_status:
+                log(f"🔄 Зміна в {hour}: {old_status} → {new_status}")
+            
             if old_status in ['powered'] and new_status in ['scheduled', 'first-half', 'second-half']:
                 added_outages.append(hour)
+                log(f"⚡ {hour}: З'явилось відключення")
             elif old_status in ['scheduled', 'first-half', 'second-half'] and new_status in ['powered']:
                 removed_outages.append(hour)
+                log(f"✅ {hour}: З'явилось світло")
         
+        log(f"📊 Підсумок: додано відключень: {len(added_outages)}, прибрано: {len(removed_outages)}")
+        
+        # Формуємо підсумковий текст
         if not added_outages and not removed_outages:
+            log("ℹ️ Графік не змінився")
             return None
         
+        # Об'єднуємо суміжні години
         added_outages_merged = self._merge_consecutive_hours(added_outages)
         removed_outages_merged = self._merge_consecutive_hours(removed_outages)
         
+        log(f"📊 Об'єднані відключення додано: {added_outages_merged}")
+        log(f"📊 Об'єднані відключення прибрано: {removed_outages_merged}")
+        
+        # Перевіряємо чи просто переставили
         if len(added_outages) == len(removed_outages) and len(added_outages) > 0:
             result = f"🔄 **Переставили відключення**\n"
             result += f"⚡ Тепер відключення: {', '.join(added_outages_merged)}\n"
             result += f"✅ Тепер світло: {', '.join(removed_outages_merged)}"
+            log(f"✓ Результат: Переставили відключення")
         else:
             result_parts = []
             
@@ -1591,7 +1681,9 @@ class DTEKChecker:
             
             result = "\n".join(result_parts)
         
+        log(f"✓ Результат порівняння: {result}")
         log("🔍 === КІНЕЦЬ ПОРІВНЯННЯ ГРАФІКІВ ===")
+        
         return result
 
     def crop_screenshot(self, screenshot_bytes, top_crop=300, bottom_crop=400, left_crop=0, right_crop=0):
@@ -1604,6 +1696,9 @@ class DTEKChecker:
             top = top_crop
             right = width - right_crop
             bottom = height - bottom_crop
+            
+            log(f"✂️ Обрізаю скріншот: {width}x{height} -> {right-left}x{bottom-top}")
+            log(f"   Координати: left={left}, top={top}, right={right}, bottom={bottom}")
             
             cropped = image.crop((left, top, right, bottom))
             
@@ -1633,13 +1728,16 @@ class DTEKChecker:
                     try:
                         await self.page.reload(wait_until='domcontentloaded', timeout=30000)
                         await asyncio.sleep(2)
+                        log("✓ Сторінка оновлена")
                     except:
-                        pass
+                        log("⚠️ Не вдалось оновити сторінку")
                 else:
+                    log(f"❌ Всі {max_attempts} спроби вичерпано")
                     raise
             except Exception as e:
                 log(f"❌ Помилка при створенні скріншота: {e}")
                 if attempt < max_attempts:
+                    log("🔄 Пробую ще раз...")
                     await asyncio.sleep(3)
                 else:
                     raise
@@ -1649,7 +1747,8 @@ class DTEKChecker:
     async def make_screenshots(self):
         """Робить скріншоти з парсингом графіка"""
         try:
-            log("🔍 Перевіряю наявність опросу...")
+            log("🔍 Перевіряю наявність вікон...")
+            await self._close_attention_popup()
             await self._close_survey_if_present()
             await asyncio.sleep(0.5)
             
@@ -1659,11 +1758,31 @@ class DTEKChecker:
             log("📊 ПАРСИНГ ГРАФІКА НА СЬОГОДНІ")
             log("="*50)
             
+            log("📋 Парсю графік на сьогодні...")
             schedule_today = await self.parse_schedule()
+            if schedule_today:
+                log(f"✓ Графік розпарсено: {len(schedule_today.get('schedule', {}))} годин")
+            else:
+                log("❌ Не вдалось розпарсити графік")
+            
+            log("🔍 Перевіряю що таблиця графіка видима...")
+            try:
+                table = self.page.locator('.active > table')
+                await table.wait_for(state='visible', timeout=10000)
+                log("✓ Таблиця графіка видима")
+            except Exception as e:
+                log(f"⚠️ Таблиця не знайдена: {e}")
             
             log("📸 Роблю скріншот основного графіка...")
-            screenshot_main = await self._make_screenshot_with_retry(max_attempts=2)
+            try:
+                screenshot_main = await self._make_screenshot_with_retry(max_attempts=2)
+            except Exception as e:
+                log(f"❌ Критична помилка при створенні скріншота: {e}")
+                raise
+            
+            # Обрізаємо за точними координатами
             screenshot_main_cropped = self.crop_screenshot(screenshot_main, top_crop=300, bottom_crop=1579, left_crop=775, right_crop=315)
+            log(f"✓ Скріншот обрізано ({len(screenshot_main_cropped)} байт)")
             
             # ЗАВТРА
             log("")
@@ -1676,27 +1795,57 @@ class DTEKChecker:
             schedule_tomorrow = None
             
             try:
+                log("🔍 Шукаю другий графік...")
                 date_selector = self.page.locator('div.date:nth-child(2)')
                 await date_selector.wait_for(state='visible', timeout=15000)
                 
                 second_date = await date_selector.text_content()
                 second_date = second_date.strip()
+                log(f"📅 Дата другого графіка: {second_date}")
                 
+                log("🖱️ Клікаю на другий графік...")
                 await self._human_move_and_click(date_selector)
+                log("⏳ Чекаю завантаження (2 сек)...")
                 await asyncio.sleep(2)
+                
+                log("🔍 Перевіряю опрос після перемикання...")
                 await self._close_survey_if_present()
                 
+                log("📋 Парсю графік на завтра...")
                 schedule_tomorrow = await self.parse_schedule()
-                screenshot_tomorrow = await self._make_screenshot_with_retry(max_attempts=2)
-                screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=1579, left_crop=775, right_crop=315)
+                if schedule_tomorrow:
+                    log(f"✓ Графік розпарсено: {len(schedule_tomorrow.get('schedule', {}))} годин")
                 
+                log("📸 Роблю скріншот другого графіка...")
+                try:
+                    screenshot_tomorrow = await self._make_screenshot_with_retry(max_attempts=2)
+                except asyncio.TimeoutError:
+                    log("❌ Таймаут при створенні скріншота завтра після всіх спроб")
+                    screenshot_tomorrow = None
+                except Exception as e:
+                    log(f"❌ Помилка скріншота завтра: {e}")
+                    screenshot_tomorrow = None
+                
+                if screenshot_tomorrow:
+                    screenshot_tomorrow_cropped = self.crop_screenshot(screenshot_tomorrow, top_crop=300, bottom_crop=1579, left_crop=775, right_crop=315)
+                    log(f"✓ Скріншот обрізано ({len(screenshot_tomorrow_cropped)} байт)")
+                
+                log("🔙 Повертаюсь на перший графік...")
                 first_date = self.page.locator('div.date:nth-child(1)')
                 await first_date.wait_for(state='visible', timeout=10000)
                 await self._human_move_and_click(first_date)
                 await asyncio.sleep(2)
+                log(f"✓ Повернувся на перший графік")
                 
+            except asyncio.TimeoutError:
+                log(f"⚠ Таймаут при роботі зі другим графіком")
             except Exception as e:
                 log(f"⚠ Не вдалось отримати другий графік: {e}")
+            
+            log("")
+            log("="*50)
+            log("✅ СКРІНШОТИ ГОТОВІ")
+            log("="*50)
             
             return {
                 'screenshot_main': screenshot_main_cropped,
@@ -1710,6 +1859,8 @@ class DTEKChecker:
             
         except Exception as e:
             log(f"✖️ Помилка при створенні скріншотів: {e}")
+            import traceback
+            log(f"Stack trace: {traceback.format_exc()}")
             raise
 
     async def close_browser(self):
@@ -1733,12 +1884,14 @@ class DTEKChecker:
         """Повний перезапуск браузера"""
         log("🔄 Починаю перезапуск браузера...")
         try:
+            # Зберігаємо останню дату перед перезапуском
             old_date = self.last_update_date
             
             await self._save_cookies()
             await self.close_browser()
             await asyncio.sleep(3)
             
+            # Ініціалізуємо заново - це включає заповнення форми
             await self.init_browser()
             
             log("✅ Браузер успішно перезапущено!")
@@ -1748,6 +1901,8 @@ class DTEKChecker:
             return True
         except Exception as e:
             log(f"❌ Помилка при перезапуску браузера: {e}")
+            import traceback
+            log(f"Stack trace: {traceback.format_exc()}")
             return False
 
 checker = DTEKChecker()
@@ -1793,7 +1948,7 @@ async def get_last_check():
                 log(f"🔍 Тип даних з БД: schedule_data={type(schedule_data)}")
                 
                 if isinstance(schedule_data, str):
-                    log("⚠️ schedule_data є строкою, парсимо JSON...")
+                    log("⚠️ schedule_data є рядком, парсимо JSON...")
                     try:
                         schedule_data = json.loads(schedule_data)
                         log(f"✓ JSON розпарсено")
@@ -1810,11 +1965,11 @@ async def get_last_check():
                     'created_at': row['created_at']
                 }
                 
-                # Додаємо дані завтра якщо вони є
+                # Додаємо дані завтра якщо є
                 if has_tomorrow_cols and row.get('schedule_tomorrow_data'):
                     schedule_tomorrow_data = row['schedule_tomorrow_data']
                     if isinstance(schedule_tomorrow_data, str):
-                        log("⚠️ schedule_tomorrow_data є строкою, парсимо JSON...")
+                        log("⚠️ schedule_tomorrow_data є рядком, парсимо JSON...")
                         try:
                             schedule_tomorrow_data = json.loads(schedule_tomorrow_data)
                             log(f"✓ JSON розпарсено")
@@ -1904,7 +2059,7 @@ async def on_ready():
     log("="*60)
     log("💡 ВАЖЛИВО: Браузер ще не ініціалізовано!")
     log(f"🌐 Відкрийте веб-інтерфейс: http://localhost:{PORT}")
-    log("🖱️  Натисніть кнопку 'Ініціалізувати браузер'")
+    log("🖱️ Натисніть кнопку 'Ініціалізувати браузер'")
     log("="*60)
     log("")
     
@@ -1916,7 +2071,7 @@ async def on_ready():
     log("✓ Автоматична перевірка запущена (кожні 5 хвилин)")
     
     restart_browser_task.start()
-    log("✓ Автоматичний перезапуск браузера запущено (щодня о 00:01)")
+    log("✓ Автоматичний перезапуск браузера запущено (щодня о 23:58)")
     log("")
 
 @tasks.loop(minutes=5)
@@ -1972,7 +2127,7 @@ async def check_schedule():
             log(f"🔍 Отримано графік на завтра: {type(schedule_tomorrow)}")
         
         if not schedule_today:
-            log("❌ Не вдалося отримати графік на сьогодні")
+            log("❌ Не вдалось отримати графік на сьогодні")
             return
         
         current_hash = checker._calculate_schedule_hash(schedule_today)
@@ -2019,7 +2174,7 @@ async def check_schedule():
                 log("ℹ️ Графік ЗАВТРА відсутній")
                 tomorrow_changed = False
         else:
-            log("📂 Попередня перевірка не знайдена (перший запуск)")
+            log("📊 Попередня перевірка не знайдена (перший запуск)")
             # При першому запуску відправляємо обидва
             today_changed = True
             tomorrow_changed = True if current_tomorrow_hash else False
@@ -2050,7 +2205,7 @@ async def check_schedule():
                 log("🔄 Починаю порівняння графіків (СЬОГОДНІ)...")
                 old_schedule = last_check['schedule_data']
                 if isinstance(old_schedule, str):
-                    log("⚠️ schedule_data є строкою, конвертую...")
+                    log("⚠️ schedule_data є рядком, конвертую...")
                     try:
                         old_schedule = json.loads(old_schedule)
                     except Exception as e:
@@ -2102,7 +2257,7 @@ async def check_schedule():
         else:
             log("⏸️ Графік СЬОГОДНІ не змінився - пропускаю")
         
-        # Відправляємо ЗАВТРА якщо змінився І є відключення
+        # Відправляємо ЗАВТРА якщо змінився Є Є відключення
         if tomorrow_changed and schedule_tomorrow and result.get('screenshot_tomorrow'):
             has_outages = checker._has_any_outages(schedule_tomorrow)
             
@@ -2189,7 +2344,7 @@ async def check_schedule():
             try:
                 error_embed = discord.Embed(
                     title="⚠️ Помилка перевірки",
-                    description=f"Не вдалося виконати перевірку.\n```{str(e)[:200]}```",
+                    description=f"Не вдалось виконати перевірку.\n```{str(e)[:200]}```",
                     color=discord.Color.dark_gray(),
                     timestamp=datetime.utcnow()
                 )
@@ -2208,10 +2363,11 @@ async def before_check_schedule():
         try:
             await checker.page.reload(wait_until='domcontentloaded', timeout=30000)
             await asyncio.sleep(3)
+            await checker._close_attention_popup()
             await checker._close_survey_if_present()
             log("✓ Сторінка прогріта")
         except Exception as e:
-            log(f"⚠️ Не вдалося прогріти сторінку: {e}")
+            log(f"⚠️ Не вдалось прогріти сторінку: {e}")
     
     log("✓ Автоматичні перевірки почнуться через 5 хвилин")
     next_check = datetime.now(UKRAINE_TZ) + timedelta(minutes=5)
@@ -2219,16 +2375,16 @@ async def before_check_schedule():
 
 @tasks.loop(minutes=1)
 async def restart_browser_task():
-    """Перевіряє чи потрібно перезапустити браузер о 00:01"""
+    """Перевіряє чи потрібно перезапустити браузер о 23:58"""
     try:
         now = datetime.now(UKRAINE_TZ)
         current_time = now.strftime('%H:%M')
         
-        # Перезапуск о 00:01
-        if current_time == '00:01':
+        # Перезапуск о 23:58
+        if current_time == '23:58':
             log("")
             log("="*60)
-            log("🔄 ЧАС ДЛЯ ПЕРЕЗАПУСКУ БРАУЗЕРА (00:01)")
+            log("🔄 ЧАС ДЛЯ ПЕРЕЗАПУСКУ БРАУЗЕРА (23:58)")
             log("="*60)
             
             if checker.browser and checker.page:
@@ -2237,7 +2393,7 @@ async def restart_browser_task():
                     try:
                         info_embed = discord.Embed(
                             title="🔄 Технічне обслуговування",
-                            description="Перезапускаю браузер для оновлення дати на сайті.\nПовернусь через хвилину!",
+                            description="Перезапускаю браузер для оновлення дати на сайті.\nПоверну через хвилину!",
                             color=discord.Color.blue(),
                             timestamp=datetime.utcnow()
                         )
@@ -2261,12 +2417,12 @@ async def restart_browser_task():
                         except:
                             pass
                 else:
-                    log("❌ Не вдалося перезапустити браузер!")
+                    log("❌ Не вдалось перезапустити браузер!")
                     if channel:
                         try:
                             error_embed = discord.Embed(
                                 title="⚠️ Помилка перезапуску",
-                                description="Не вдалося перезапустити браузер. Потрібна ручна ініціалізація через веб-інтерфейс.",
+                                description="Не вдалось перезапустити браузер. Потрібна ручна ініціалізація через веб-інтерфейс.",
                                 color=discord.Color.red(),
                                 timestamp=datetime.utcnow()
                             )
@@ -2322,7 +2478,7 @@ async def manual_check(ctx):
             log("🔄 [MANUAL] Починаю порівняння графіків (СЬОГОДНІ)...")
             old_schedule = last_check['schedule_data']
             if isinstance(old_schedule, str):
-                log("⚠️ [MANUAL] schedule_data є строкою, конвертую...")
+                log("⚠️ [MANUAL] schedule_data є рядком, конвертую...")
                 try:
                     old_schedule = json.loads(old_schedule)
                 except Exception as e:
@@ -2380,9 +2536,8 @@ async def manual_check(ctx):
         # Відправляємо ЗАВТРА якщо є відключення
         if schedule_tomorrow and result.get('screenshot_tomorrow'):
             has_outages = checker._has_any_outages(schedule_tomorrow)
-            
             if has_outages:
-                # Порівнюємо ЗАВТРА
+                # Порівнюємо з попереднім
                 changes_text_tomorrow = None
                 if last_check and last_check.get('schedule_tomorrow_data'):
                     old_schedule_tomorrow = last_check['schedule_tomorrow_data']
@@ -2448,7 +2603,7 @@ async def bot_info(ctx):
     )
     
     embed.add_field(
-        name="📍 Адреса моніторингу",
+        name="🏠 Адреса моніторингу",
         value="с. Книжичі, вул. Київська, 168",
         inline=False
     )
@@ -2488,7 +2643,7 @@ async def bot_info(ctx):
     
     embed.add_field(
         name="🔄 Автоматичний перезапуск",
-        value="Щодня о 00:01 (для оновлення дати)",
+        value="Щодня о 23:58 (для оновлення дати)",
         inline=False
     )
     
@@ -2558,7 +2713,7 @@ async def restart_browser_command(ctx):
     if success:
         await ctx.send("✅ Браузер успішно перезапущено!")
     else:
-        await ctx.send("❌ Помилка при перезапуску браузера. Перевірте логи.")
+        await ctx.send("❌ Помилка перезапуску браузера. Перевірте логи.")
 
 if __name__ == '__main__':
     try:
