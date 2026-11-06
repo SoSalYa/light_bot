@@ -2,6 +2,7 @@ import discord
 from discord.ext import commands, tasks
 from discord.ui import Button, View
 import asyncio
+import functools
 from playwright.async_api import async_playwright
 import os
 from datetime import datetime, timedelta
@@ -18,10 +19,36 @@ from collections import deque
 import pytz
 
 # Конфігурація
-DISCORD_TOKEN = os.getenv('DISCORD_TOKEN')
-CHANNEL_ID = int(os.getenv('DISCORD_CHANNEL_ID'))
-DATABASE_URL = os.getenv('DATABASE_URL')
-PORT = int(os.getenv('PORT', 10000))
+DISCORD_TOKEN = (os.getenv('DISCORD_TOKEN') or '').strip()
+CHANNEL_ID_RAW = (os.getenv('DISCORD_CHANNEL_ID') or '').strip()
+DATABASE_URL = (os.getenv('DATABASE_URL') or '').strip()
+try:
+    CHANNEL_ID = int(CHANNEL_ID_RAW) if CHANNEL_ID_RAW else 0
+except ValueError:
+    CHANNEL_ID = 0
+try:
+    PORT = int(os.getenv('PORT', '10000'))
+except ValueError:
+    PORT = 10000
+
+
+def validate_config():
+    """Перевіряє обов'язкові змінні середовища перед запуском."""
+    missing = []
+    if not DISCORD_TOKEN:
+        missing.append('DISCORD_TOKEN')
+    if not CHANNEL_ID_RAW:
+        missing.append('DISCORD_CHANNEL_ID')
+    if not DATABASE_URL:
+        missing.append('DATABASE_URL')
+    if missing:
+        raise RuntimeError(
+            'Не задані обов’язкові змінні середовища: ' + ', '.join(missing)
+        )
+    if CHANNEL_ID <= 0:
+        raise RuntimeError('DISCORD_CHANNEL_ID має бути додатним числом.')
+    if not (1 <= PORT <= 65535):
+        raise RuntimeError('PORT має бути числом від 1 до 65535.')
 
 # Часовий пояс України (UTC+2/+3)
 UKRAINE_TZ = pytz.timezone('Europe/Kiev')
@@ -31,6 +58,8 @@ db_pool = None
 
 # Логування в пам'яті для веб-інтерфейсу
 log_buffer = deque(maxlen=500)
+web_runner = None
+runtime_initialized = False
 
 # Глобальна змінна для зберігання поточної капчі
 current_captcha = None
@@ -47,7 +76,46 @@ def log(message):
 # Створення бота
 intents = discord.Intents.default()
 intents.message_content = True
-bot = commands.Bot(command_prefix='!', intents=intents)
+
+
+class ManagedBot(commands.Bot):
+    """Забезпечує послідовне завершення задач, HTTP-сервера, браузера та БД."""
+    async def close(self):
+        pending = []
+        for loop_task in (check_schedule, restart_browser_task):
+            try:
+                task = loop_task.get_task()
+                if task is not None and not task.done():
+                    loop_task.cancel()
+                    pending.append(task)
+            except Exception as exc:
+                log(f'⚠️ Не вдалося зупинити фонову задачу: {exc}')
+
+        if pending:
+            await asyncio.gather(*pending, return_exceptions=True)
+
+        # Спочатку припиняємо приймати запити, потім закриваємо ресурси браузера.
+        try:
+            await close_web_server()
+        except Exception as exc:
+            log(f'⚠️ Помилка очищення (HTTP-сервер): {exc}')
+
+        try:
+            async with checker.operation_lock:
+                await checker._save_cookies()
+                await checker.close_browser()
+        except Exception as exc:
+            log(f'⚠️ Помилка очищення (браузер/cookies): {exc}')
+
+        try:
+            await close_db_pool()
+        except Exception as exc:
+            log(f'⚠️ Помилка очищення (пул БД): {exc}')
+
+        await super().close()
+
+
+bot = ManagedBot(command_prefix='!', intents=intents)
 
 class CaptchaState:
     """Клас для зберігання стану капчі"""
@@ -182,9 +250,20 @@ async def init_db_pool():
 async def close_db_pool():
     """Закриття connection pool"""
     global db_pool
-    if db_pool:
-        await db_pool.close()
+    pool = db_pool
+    if pool:
+        await pool.close()
+        db_pool = None
         log("✓ Database pool закрито")
+
+def browser_locked(func):
+    """Серіалізує операції з браузером, щоб вони не виконувались паралельно."""
+    @functools.wraps(func)
+    async def wrapper(*args, **kwargs):
+        async with checker.operation_lock:
+            return await func(*args, **kwargs)
+    return wrapper
+
 
 # HTTP сервер для Render health checks + VNC interface
 async def handle_health(request):
@@ -701,6 +780,7 @@ async def handle_root(request):
     """
     return web.Response(text=html, content_type='text/html')
 
+@browser_locked
 async def handle_screenshot(request):
     """API: Получити скріншот браузера"""
     try:
@@ -717,6 +797,7 @@ async def handle_screenshot(request):
     except Exception as e:
         return web.json_response({'error': str(e)}, status=500)
 
+@browser_locked
 async def handle_click(request):
     """API: Передати клік в браузер"""
     try:
@@ -737,6 +818,7 @@ async def handle_click(request):
     except Exception as e:
         return web.json_response({'error': str(e)}, status=500)
 
+@browser_locked
 async def handle_init(request):
     """API: Ініціалізувати браузер"""
     try:
@@ -751,6 +833,7 @@ async def handle_init(request):
             'success': False
         }, status=500)
 
+@browser_locked
 async def handle_check(request):
     """API: Виконати перевірку"""
     try:
@@ -766,6 +849,7 @@ async def handle_check(request):
             'success': False
         }, status=500)
 
+@browser_locked
 async def handle_clear_cookies(request):
     """API: Очистити куки"""
     try:
@@ -800,12 +884,17 @@ async def handle_status(request):
     })
 
 async def start_web_server():
-    """Запуск веб-сервера з VNC інтерфейсом"""
+    """Запускає веб-сервер лише один раз, навіть після перепідключення Discord."""
+    global web_runner
+    if web_runner is not None:
+        log('ℹ️ Web server вже запущений — повторний запуск пропущено')
+        return
+
     app = web.Application()
-    
+
     app.router.add_get('/', handle_root)
     app.router.add_get('/health', handle_health)
-    
+
     app.router.add_get('/api/screenshot', handle_screenshot)
     app.router.add_post('/api/click', handle_click)
     app.router.add_get('/api/init', handle_init)
@@ -813,12 +902,28 @@ async def start_web_server():
     app.router.add_post('/api/clear-cookies', handle_clear_cookies)
     app.router.add_get('/api/status', handle_status)
     app.router.add_get('/api/logs', handle_logs)
-    
+
     runner = web.AppRunner(app)
     await runner.setup()
-    site = web.TCPSite(runner, '0.0.0.0', PORT)
-    await site.start()
+    try:
+        site = web.TCPSite(runner, '0.0.0.0', PORT)
+        await site.start()
+    except Exception:
+        await runner.cleanup()
+        raise
+
+    web_runner = runner
     log(f"✓ Web server started on port {PORT}")
+
+
+async def close_web_server():
+    """Коректно зупиняє HTTP-сервер під час завершення бота."""
+    global web_runner
+    runner = web_runner
+    web_runner = None
+    if runner is not None:
+        await runner.cleanup()
+        log('✓ Web server зупинено')
 
 class DTEKChecker:
     def __init__(self):
@@ -830,6 +935,8 @@ class DTEKChecker:
         self.cookies_file = 'dtek_cookies.json'
         self.captcha_attempts = 0
         self.max_captcha_attempts = 3
+        # Один браузер не повинен одночасно обслуговувати дві перевірки/команди.
+        self.operation_lock = asyncio.Lock()
     
     def _get_random_user_agent(self):
         user_agents = [
@@ -2045,36 +2152,45 @@ async def save_check(update_date, schedule_hash, schedule_data, schedule_tomorro
 
 @bot.event
 async def on_ready():
+    global runtime_initialized
+
     log(f'✓ {bot.user} підключено до Discord!')
+    if runtime_initialized:
+        log('ℹ️ Повторне підключення Discord: фонові задачі та веб-сервер уже працюють')
+        return
+
     log(f'✓ Моніторинг каналу: {CHANNEL_ID}')
-    log(f'✓ Інтервал перевірки: кожні 5 хвилин')
+    log('✓ Інтервал перевірки: кожні 5 хвилин')
     log(f'🌐 Веб-інтерфейс запущено на порту {PORT}')
-    log(f'🥷 STEALTH MODE активовано')
     log(f'🕐 Часовий пояс: Europe/Kiev (UTC+2/+3)')
-    
+
     await init_db_pool()
     await start_web_server()
-    
-    log("")
-    log("="*60)
-    log("💡 ВАЖЛИВО: Браузер ще не ініціалізовано!")
-    log(f"🌐 Відкрийте веб-інтерфейс: http://localhost:{PORT}")
+
+    log('')
+    log('=' * 60)
+    log('💡 ВАЖЛИВО: Браузер ще не ініціалізовано!')
+    log(f'🌐 Відкрийте веб-інтерфейс: http://localhost:{PORT}')
     log("🖱️ Натисніть кнопку 'Ініціалізувати браузер'")
-    log("="*60)
-    log("")
-    
-    log("🎉 Бот готовий до роботи!")
+    log('=' * 60)
+    log('')
+
+    log('🎉 Бот готовий до роботи!')
     now = datetime.now(UKRAINE_TZ)
-    log(f"⏰ Поточний час: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-    
-    check_schedule.start()
-    log("✓ Автоматична перевірка запущена (кожні 5 хвилин)")
-    
-    restart_browser_task.start()
-    log("✓ Автоматичний перезапуск браузера запущено (щодня о 23:58)")
-    log("")
+    log(f'⏰ Поточний час: {now.strftime("%Y-%m-%d %H:%M:%S %Z")}')
+
+    if not check_schedule.is_running():
+        check_schedule.start()
+        log('✓ Автоматична перевірка запущена (кожні 5 хвилин)')
+    if not restart_browser_task.is_running():
+        restart_browser_task.start()
+        log('✓ Автоматичний перезапуск браузера запущено (щодня о 23:58)')
+
+    runtime_initialized = True
+    log('')
 
 @tasks.loop(minutes=5)
+@browser_locked
 async def check_schedule():
     """Періодична перевірка кожні 5 хвилин"""
     channel = None
@@ -2361,10 +2477,11 @@ async def before_check_schedule():
     if checker.browser and checker.page:
         log("🔥 Прогрів сторінки перед першою перевіркою...")
         try:
-            await checker.page.reload(wait_until='domcontentloaded', timeout=30000)
-            await asyncio.sleep(3)
-            await checker._close_attention_popup()
-            await checker._close_survey_if_present()
+            async with checker.operation_lock:
+                await checker.page.reload(wait_until='domcontentloaded', timeout=30000)
+                await asyncio.sleep(3)
+                await checker._close_attention_popup()
+                await checker._close_survey_if_present()
             log("✓ Сторінка прогріта")
         except Exception as e:
             log(f"⚠️ Не вдалось прогріти сторінку: {e}")
@@ -2401,7 +2518,8 @@ async def restart_browser_task():
                     except:
                         pass
                 
-                success = await checker.restart_browser()
+                async with checker.operation_lock:
+                    success = await checker.restart_browser()
                 
                 if success:
                     log("✅ Браузер перезапущено успішно!")
@@ -2448,6 +2566,7 @@ async def before_restart_browser_task():
     log("✓ Задача перезапуску браузера готова")
 
 @bot.command(name='check')
+@browser_locked
 async def manual_check(ctx):
     """Ручна перевірка по команді !check"""
     if not checker.browser or not checker.page:
@@ -2686,19 +2805,12 @@ async def bot_status(ctx):
 @bot.command(name='stop')
 @commands.has_permissions(administrator=True)
 async def stop_bot(ctx):
-    """Остановка бота"""
+    """Зупиняє бота та передає очищення ресурсів єдиному обробнику."""
     await ctx.send("🛑 Зупиняю бота...")
-    check_schedule.cancel()
-    restart_browser_task.cancel()
-    try:
-        await checker._save_cookies()
-        await checker.close_browser()
-    except:
-        pass
-    await close_db_pool()
     await bot.close()
 
 @bot.command(name='restart')
+@browser_locked
 async def restart_browser_command(ctx):
     """Ручний перезапуск браузера"""
     if not checker.browser or not checker.page:
@@ -2717,35 +2829,29 @@ async def restart_browser_command(ctx):
 
 if __name__ == '__main__':
     try:
-        log("")
-        log("="*60)
-        log("🤖 ЗАПУСК DISCORD БОТА DTEK")
-        log("="*60)
+        validate_config()
+        log('')
+        log('=' * 60)
+        log('🤖 ЗАПУСК DISCORD БОТА DTEK')
+        log('=' * 60)
         now = datetime.now(UKRAINE_TZ)
-        log(f"📅 Дата і час запуску: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-        log(f"🌐 Порт веб-інтерфейсу: {PORT}")
-        log(f"📢 Discord канал: {CHANNEL_ID}")
-        log(f"💾 База даних: {'✓ Налаштована' if DATABASE_URL else '✗ Не налаштована'}")
-        log("="*60)
-        log("")
-        
+        log(f'📅 Дата і час запуску: {now.strftime("%Y-%m-%d %H:%M:%S %Z")}')
+        log(f'🌐 Порт веб-інтерфейсу: {PORT}')
+        log(f'📢 Discord канал: {CHANNEL_ID}')
+        log('💾 База даних: ✓ Налаштована')
+        log('=' * 60)
+        log('')
+
         bot.run(DISCORD_TOKEN)
     except KeyboardInterrupt:
-        log("")
-        log("🛑 Отримано сигнал зупинки...")
+        log('')
+        log('🛑 Отримано сигнал зупинки...')
     except Exception as e:
-        log("")
-        log(f"❌ КРИТИЧНА ПОМИЛКА: {e}")
+        log('')
+        log(f'❌ КРИТИЧНА ПОМИЛКА: {e}')
     finally:
-        log("")
-        log("🧹 Очищення ресурсів...")
-        try:
-            asyncio.run(checker._save_cookies())
-            asyncio.run(checker.close_browser())
-            asyncio.run(close_db_pool())
-        except:
-            pass
-        log("✓ Бот зупинено")
+        log('')
+        log('✓ Бот зупинено')
         now = datetime.now(UKRAINE_TZ)
-        log(f"📅 Час зупинки: {now.strftime('%Y-%m-%d %H:%M:%S %Z')}")
-        log("")
+        log(f'📅 Час зупинки: {now.strftime("%Y-%m-%d %H:%M:%S %Z")}')
+        log('')
